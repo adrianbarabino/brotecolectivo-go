@@ -24,41 +24,40 @@ func (h *AuthHandler) GetNews(w http.ResponseWriter, r *http.Request) {
 		FROM news n
 		LEFT JOIN news_bands nb ON n.id = nb.id_news
 		LEFT JOIN bands b ON nb.id_band = b.id
-		ORDER BY n.id
+		ORDER BY n.id DESC
 	`)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
-
+	var allNews []News
 	newsMap := make(map[int]*News)
+
 	for rows.Next() {
 		var nid int
 		var slug, title, content string
 		var bID sql.NullInt64
 		var bName, bSlug sql.NullString
 
-		err := rows.Scan(
-			&nid, &slug, &title, &content,
-			&bID, &bName, &bSlug,
-		)
+		err := rows.Scan(&nid, &slug, &title, &content, &bID, &bName, &bSlug)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
 		if _, ok := newsMap[nid]; !ok {
-			newsMap[nid] = &News{
+			n := News{
 				ID:      nid,
 				Slug:    slug,
 				Title:   title,
 				Content: content,
 				Bands:   []Band{},
 			}
+			newsMap[nid] = &n
+			allNews = append(allNews, n) // guardás la referencia al orden
 		}
 
-		// Solo agregar si hay banda
 		if bID.Valid {
 			newsMap[nid].Bands = append(newsMap[nid].Bands, Band{
 				ID:   int(bID.Int64),
@@ -68,12 +67,15 @@ func (h *AuthHandler) GetNews(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	var allNews []News
-	for _, n := range newsMap {
-		allNews = append(allNews, *n)
+	// como `allNews` tiene copias de los structs, y los actualizás en `newsMap`, tenés que reconstruir con referencias
+	for i, n := range allNews {
+		if updated, ok := newsMap[n.ID]; ok {
+			allNews[i] = *updated
+		}
 	}
 
 	json.NewEncoder(w).Encode(allNews)
+
 }
 
 func (h *AuthHandler) GetNewsByID(w http.ResponseWriter, r *http.Request) {
@@ -198,38 +200,51 @@ func (h *AuthHandler) GetNewsByBand(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer rows.Close()
-
+	var allNews []News
 	newsMap := make(map[int]*News)
+
 	for rows.Next() {
 		var nid int
 		var slug, title, content string
-		var b Band
+		var bID sql.NullInt64
+		var bName, bSlug sql.NullString
 
-		err := rows.Scan(&nid, &slug, &title, &content, &b.ID, &b.Name, &b.Slug)
+		err := rows.Scan(&nid, &slug, &title, &content, &bID, &bName, &bSlug)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
 		if _, ok := newsMap[nid]; !ok {
-			newsMap[nid] = &News{
+			n := News{
 				ID:      nid,
 				Slug:    slug,
 				Title:   title,
 				Content: content,
 				Bands:   []Band{},
 			}
+			newsMap[nid] = &n
+			allNews = append(allNews, n) // guardás la referencia al orden
 		}
 
-		newsMap[nid].Bands = append(newsMap[nid].Bands, b)
+		if bID.Valid {
+			newsMap[nid].Bands = append(newsMap[nid].Bands, Band{
+				ID:   int(bID.Int64),
+				Name: bName.String,
+				Slug: bSlug.String,
+			})
+		}
 	}
 
-	var noticias []News
-	for _, n := range newsMap {
-		noticias = append(noticias, *n)
+	// como `allNews` tiene copias de los structs, y los actualizás en `newsMap`, tenés que reconstruir con referencias
+	for i, n := range allNews {
+		if updated, ok := newsMap[n.ID]; ok {
+			allNews[i] = *updated
+		}
 	}
 
-	json.NewEncoder(w).Encode(noticias)
+	json.NewEncoder(w).Encode(allNews)
+
 }
 
 func (h *AuthHandler) UpdateNews(w http.ResponseWriter, r *http.Request) {

@@ -18,13 +18,14 @@ import (
 )
 
 type Song struct {
-	ID      int    `json:"id"`
-	Title   string `json:"title"`
-	Slug    string `json:"slug"`
-	BandID  int    `json:"band_id"`
-	GenreID int    `json:"genre_id"`
-	Band    *Band  `json:"band,omitempty"`
-	Genre   *Genre `json:"genre,omitempty"`
+	ID       int    `json:"id"`
+	Title    string `json:"title"`
+	Slug     string `json:"slug"`
+	BandID   int    `json:"band_id"`
+	GenreID  int    `json:"genre_id"`
+	LyricsID int    `json:"lyrics_id"`
+	Band     *Band  `json:"band,omitempty"`
+	Genre    *Genre `json:"genre,omitempty"`
 }
 
 type Genre struct {
@@ -32,14 +33,34 @@ type Genre struct {
 	Name string `json:"name"`
 }
 
+type Lyrics struct {
+	ID     int    `json:"id"`
+	Lyric  string `json:"lyric"`
+	IDSong int    `json:"id_song"`
+	Author string `json:"author"`
+}
+
+func (h *AuthHandler) GetLyricsByID(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	row, _ := h.DB.SelectRow("SELECT id, lyric, id_song, author FROM lyrics WHERE id = ?", id)
+	var l Lyrics
+	err := row.Scan(&l.ID, &l.Lyric, &l.IDSong, &l.Author)
+	if err != nil {
+		http.Error(w, "Letra no encontrada", http.StatusNotFound)
+		return
+	}
+	json.NewEncoder(w).Encode(l)
+}
+
 func (h *AuthHandler) GetSongs(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.DB.Select(`
 		SELECT s.id, s.title, s.slug, s.id_band, s.id_genre,
 		       b.id, b.name, b.slug,
-		       g.id, g.name
+		       g.id, g.name, l.id
 		FROM songs s
 		LEFT JOIN bands b ON s.id_band = b.id
 		LEFT JOIN genres g ON s.id_genre = g.id
+		LEFT JOIN lyrics l ON s.id = l.id_song
 	`)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -54,11 +75,12 @@ func (h *AuthHandler) GetSongs(w http.ResponseWriter, r *http.Request) {
 		var bName, bSlug sql.NullString
 		var gID sql.NullInt64
 		var gName sql.NullString
+		var lID sql.NullInt64
 
 		err := rows.Scan(
 			&s.ID, &s.Title, &s.Slug, &s.BandID, &s.GenreID,
 			&bID, &bName, &bSlug,
-			&gID, &gName,
+			&gID, &gName, &lID,
 		)
 
 		if err != nil {
@@ -78,6 +100,10 @@ func (h *AuthHandler) GetSongs(w http.ResponseWriter, r *http.Request) {
 				ID:   int(gID.Int64),
 				Name: gName.String,
 			}
+		}
+
+		if lID.Valid {
+			s.LyricsID = int(lID.Int64)
 		}
 
 		songs = append(songs, s)

@@ -124,6 +124,9 @@ func InitRoutes(authHandler *handlers.AuthHandler) *chi.Mux {
 
 	// for songs
 	r.Route("/songs", func(r chi.Router) {
+		// for Lyrics by ID
+		r.Get("/lyrics/{id}", authHandler.GetLyricsByID)
+
 		r.Get("/", authHandler.GetSongs)
 		r.Post("/", authHandler.CreateSong)
 		r.Route("/{id}", func(r chi.Router) {
