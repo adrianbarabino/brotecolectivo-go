@@ -41,6 +41,9 @@ func InitRoutes(authHandler *handlers.AuthHandler) *chi.Mux {
 	// Rutas públicas (RESTful)
 	r.Route("/bands", func(r chi.Router) {
 		r.Get("/count", authHandler.GetBandsCount)
+		r.Get("/table", authHandler.GetBandsDatatable)
+		r.Post("/upload-image", authHandler.UploadBandImage)
+		r.Get("/slug/{slug}", authHandler.CheckBandSlug)
 
 		r.Get("/", authHandler.GetBands)
 		r.Post("/", authHandler.CreateBand)
@@ -82,6 +85,9 @@ func InitRoutes(authHandler *handlers.AuthHandler) *chi.Mux {
 	// })
 
 	r.Route("/events", func(r chi.Router) {
+		r.Get("/count", authHandler.GetEventsCount)
+		r.Get("/table", authHandler.GetEventsDatatable)
+		r.Post("/upload-image", authHandler.UploadEventImage)
 		r.Get("/", authHandler.GetEvents)    // Todos los eventos (con búsqueda, paginación, etc)
 		r.Post("/", authHandler.CreateEvent) // Crear evento con bandas
 
@@ -94,10 +100,14 @@ func InitRoutes(authHandler *handlers.AuthHandler) *chi.Mux {
 			r.Delete("/", authHandler.DeleteEvent) // Borrar evento + bandas asociadas
 		})
 	})
+	r.Post("/artist-link-request", authHandler.CreateArtistLinkRequest)
+
 	r.Route("/submissions", func(r chi.Router) {
-		r.Get("/", authHandler.GetSubmissions)             // Obtener todas las submissions (solo admin o moderador)
-		r.Post("/", authHandler.CreateSubmission)          // Crear nueva submission (cualquier usuario)
-		r.Get("/{id}", authHandler.GetSubmissionByID)      // Ver una submission individual
+		r.Get("/", authHandler.GetSubmissions) // Obtener todas las submissions (solo admin o moderador)
+		r.Post("/upload-image", authHandler.UploadSubmissionImage)
+		r.Post("/", authHandler.CreateSubmission)     // Crear nueva submission (cualquier usuario)
+		r.Get("/{id}", authHandler.GetSubmissionByID) // Ver una submission individual
+		r.Post("/{id}/approve", authHandler.ApproveSubmission)
 		r.Put("/{id}", authHandler.UpdateSubmissionStatus) // Aprobar/Rechazar una submission (admin/moderador)
 	})
 	r.Route("/edits", func(r chi.Router) {
@@ -109,7 +119,8 @@ func InitRoutes(authHandler *handlers.AuthHandler) *chi.Mux {
 
 	r.Route("/news", func(r chi.Router) {
 		r.Get("/count", authHandler.GetNewsCount)
-
+		r.Post("/upload-image", authHandler.UploadNewsImage)
+		r.Get("/table", authHandler.GetNewsDatatable)
 		r.Get("/", authHandler.GetNews)
 
 		r.Post("/", authHandler.CreateNews)

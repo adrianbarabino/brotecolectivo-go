@@ -4,8 +4,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"os"
 	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -20,6 +23,206 @@ type Event struct {
 	DateEnd   string `json:"date_end"`
 	Venue     *Venue `json:"venue"`
 	Bands     []Band `json:"bands"`
+	VenueID   int    `json:"id_venue"` // <--- agregar esto
+
+}
+
+func (h *AuthHandler) UploadEventImage(w http.ResponseWriter, r *http.Request) {
+	r.ParseMultipartForm(10 << 20)
+	file, handler, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, "No se pudo leer el archivo", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	slug := r.FormValue("slug")
+	if slug == "" {
+		http.Error(w, "Slug faltante", http.StatusBadRequest)
+		return
+	}
+
+	tempFile, err := os.CreateTemp("", "upload-*.jpg")
+	if err != nil {
+		http.Error(w, "No se pudo crear archivo temporal", http.StatusInternalServerError)
+		return
+	}
+	defer os.Remove(tempFile.Name())
+	io.Copy(tempFile, file)
+
+	err = uploadToSpaces(tempFile.Name(), "events/"+slug+".jpg", handler.Header.Get("Content-Type"))
+	if err != nil {
+		http.Error(w, "Error al subir imagen: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]string{"message": "Imagen subida con éxito"})
+}
+
+func (h *AuthHandler) GetEventsCount(w http.ResponseWriter, r *http.Request) {
+	search := r.URL.Query().Get("q")
+	idFilter := r.URL.Query().Get("id")
+	titleFilter := r.URL.Query().Get("title")
+	dateFilter := r.URL.Query().Get("date_start")
+
+	query := `
+		SELECT COUNT(*) 
+		FROM events e
+		JOIN venues v ON e.id_venue = v.id
+		WHERE 1=1
+	`
+	var queryParams []interface{}
+
+	if search != "" {
+		pattern := "%" + search + "%"
+		query += ` AND (e.title LIKE ? OR e.tags LIKE ? OR e.content LIKE ? OR e.slug LIKE ?)`
+		queryParams = append(queryParams, pattern, pattern, pattern, pattern)
+	}
+	if idFilter != "" {
+		query += " AND e.id LIKE ?"
+		queryParams = append(queryParams, "%"+idFilter+"%")
+	}
+	if titleFilter != "" {
+		query += " AND e.title LIKE ?"
+		queryParams = append(queryParams, "%"+titleFilter+"%")
+	}
+	if dateFilter != "" {
+		query += " AND e.date_start LIKE ?"
+		queryParams = append(queryParams, "%"+dateFilter+"%")
+	}
+
+	row, err := h.DB.SelectRow(query, queryParams...)
+	if err != nil {
+		http.Error(w, "Error al contar eventos", http.StatusInternalServerError)
+		return
+	}
+
+	var count int
+	if err := row.Scan(&count); err != nil {
+		http.Error(w, "Error al leer el conteo", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]int{"count": count})
+}
+
+func (h *AuthHandler) GetEventsDatatable(w http.ResponseWriter, r *http.Request) {
+	offsetParam := r.URL.Query().Get("offset")
+	limitParam := r.URL.Query().Get("limit")
+	search := r.URL.Query().Get("q")
+	sortBy := r.URL.Query().Get("sort")
+	order := r.URL.Query().Get("order")
+
+	idFilter := r.URL.Query().Get("id")
+	titleFilter := r.URL.Query().Get("title")
+	dateFilter := r.URL.Query().Get("date_start")
+
+	offset := 0
+	limit := 10
+	var err error
+
+	if offsetParam != "" {
+		offset, err = strconv.Atoi(offsetParam)
+		if err != nil {
+			http.Error(w, "Offset inválido", http.StatusBadRequest)
+			return
+		}
+	}
+	if limitParam != "" {
+		limit, err = strconv.Atoi(limitParam)
+		if err != nil {
+			http.Error(w, "Límite inválido", http.StatusBadRequest)
+			return
+		}
+	}
+
+	query := `
+		SELECT 
+			e.id, e.title, e.tags, e.content, e.slug, e.date_start, e.date_end,
+			v.id, v.name
+		FROM events e
+		JOIN venues v ON e.id_venue = v.id
+		WHERE 1=1
+	`
+	var queryParams []interface{}
+
+	if search != "" {
+		pattern := "%" + search + "%"
+		query += ` AND (e.title LIKE ? OR e.tags LIKE ? OR e.content LIKE ? OR e.slug LIKE ?)`
+		queryParams = append(queryParams, pattern, pattern, pattern, pattern)
+	}
+	if idFilter != "" {
+		query += " AND e.id LIKE ?"
+		queryParams = append(queryParams, "%"+idFilter+"%")
+	}
+	if titleFilter != "" {
+		query += " AND e.title LIKE ?"
+		queryParams = append(queryParams, "%"+titleFilter+"%")
+	}
+	if dateFilter != "" {
+		query += " AND e.date_start LIKE ?"
+		queryParams = append(queryParams, "%"+dateFilter+"%")
+	}
+
+	if sortBy != "" {
+		validSorts := map[string]bool{"id": true, "title": true, "date_start": true}
+		if validSorts[sortBy] {
+			if order != "desc" {
+				order = "asc"
+			}
+			query += fmt.Sprintf(" ORDER BY e.%s %s", sortBy, strings.ToUpper(order))
+		}
+	}
+
+	query += " LIMIT ? OFFSET ?"
+	queryParams = append(queryParams, limit, offset)
+	fmt.Println("QUERY:", query)
+	fmt.Println("PARAMS:", queryParams)
+
+	rows, err := h.DB.Select(query, queryParams...)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	var events []Event
+	for rows.Next() {
+		var e Event
+		var v Venue
+		err := rows.Scan(&e.ID, &e.Title, &e.Tags, &e.Content, &e.Slug, &e.DateStart, &e.DateEnd,
+			&v.ID, &v.Name)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		e.Venue = &v
+
+		bandRows, err := h.DB.Select(`
+			SELECT b.id, b.name, b.slug
+			FROM bands b
+			JOIN events_bands eb ON b.id = eb.id_band
+			WHERE eb.id_event = ?
+		`, e.ID)
+		if err == nil {
+			var bands []Band
+			for bandRows.Next() {
+				var b Band
+				if err := bandRows.Scan(&b.ID, &b.Name, &b.Slug); err == nil {
+					bands = append(bands, b)
+				}
+			}
+			bandRows.Close()
+			e.Bands = bands
+		}
+
+		events = append(events, e)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(events)
 }
 
 func (h *AuthHandler) GetEvents(w http.ResponseWriter, r *http.Request) {
@@ -127,7 +330,7 @@ func (h *AuthHandler) GetEventByID(w http.ResponseWriter, r *http.Request) {
 		SELECT
 
 			e.id, e.title, e.tags, e.content, e.slug, e.date_start, e.date_end,
-			v.id, v.name
+			v.id, v.name, v.latlng, v.address, v.city
 		FROM events e
 		JOIN venues v ON e.id_venue = v.id
 		WHERE e.id = ?
@@ -137,7 +340,7 @@ func (h *AuthHandler) GetEventByID(w http.ResponseWriter, r *http.Request) {
 		row, err = h.DB.SelectRow(`
 		SELECT
 			e.id, e.title, e.tags, e.content, e.slug, e.date_start, e.date_end,
-			v.id, v.name
+			v.id, v.name, v.latlng, v.address, v.city
 		FROM events e
 		JOIN venues v ON e.id_venue = v.id
 		WHERE e.slug = ?
@@ -149,7 +352,7 @@ func (h *AuthHandler) GetEventByID(w http.ResponseWriter, r *http.Request) {
 	}
 
 	err = row.Scan(&e.ID, &e.Title, &e.Tags, &e.Content, &e.Slug, &e.DateStart, &e.DateEnd,
-		&v.ID, &v.Name)
+		&v.ID, &v.Name, &v.LatLng, &v.Address, &v.City)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return

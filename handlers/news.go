@@ -3,8 +3,13 @@ package handlers
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
+	"os"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -95,8 +100,73 @@ func (h *AuthHandler) GetNews(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(allNews)
 
 }
+
+func (h *AuthHandler) UploadNewsImage(w http.ResponseWriter, r *http.Request) {
+	r.ParseMultipartForm(10 << 20) // 10MB
+
+	file, handler, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, "No se pudo leer el archivo", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	slug := r.FormValue("slug")
+	if slug == "" {
+		http.Error(w, "Slug faltante", http.StatusBadRequest)
+		return
+	}
+
+	// Crear archivo temporal
+	tempFile, err := os.CreateTemp("", "upload-*.jpg")
+	if err != nil {
+		http.Error(w, "No se pudo crear archivo temporal", http.StatusInternalServerError)
+		return
+	}
+	defer os.Remove(tempFile.Name())
+	io.Copy(tempFile, file)
+
+	// Subir a Spaces o tu servicio de almacenamiento
+	err = uploadToSpaces(tempFile.Name(), "news/"+slug+".jpg", handler.Header.Get("Content-Type"))
+	if err != nil {
+		http.Error(w, "Error al subir imagen: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]string{
+		"message": "Imagen subida con éxito",
+	})
+}
+
 func (h *AuthHandler) GetNewsCount(w http.ResponseWriter, r *http.Request) {
-	row, err := h.DB.SelectRow("SELECT COUNT(*) FROM news")
+	search := r.URL.Query().Get("q")
+	idFilter := r.URL.Query().Get("id")
+	titleFilter := r.URL.Query().Get("title")
+	dateFilter := r.URL.Query().Get("date")
+
+	query := `SELECT COUNT(*) FROM news WHERE 1=1`
+	var queryParams []interface{}
+
+	if search != "" {
+		pattern := "%" + search + "%"
+		query += ` AND (title LIKE ? OR content LIKE ? OR slug LIKE ?)`
+		queryParams = append(queryParams, pattern, pattern, pattern)
+	}
+	if idFilter != "" {
+		query += " AND id LIKE ?"
+		queryParams = append(queryParams, "%"+idFilter+"%")
+	}
+	if titleFilter != "" {
+		query += " AND title LIKE ?"
+		queryParams = append(queryParams, "%"+titleFilter+"%")
+	}
+	if dateFilter != "" {
+		query += " AND date LIKE ?"
+		queryParams = append(queryParams, "%"+dateFilter+"%")
+	}
+
+	row, err := h.DB.SelectRow(query, queryParams...)
 	if err != nil {
 		http.Error(w, "Error al contar noticias", http.StatusInternalServerError)
 		return
@@ -111,6 +181,7 @@ func (h *AuthHandler) GetNewsCount(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]int{"count": count})
 }
+
 func (h *AuthHandler) GetNewsByID(w http.ResponseWriter, r *http.Request) {
 	idOrSlug := chi.URLParam(r, "id")
 
@@ -186,9 +257,17 @@ func (h *AuthHandler) CreateNews(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Convertir string "YYYY-MM-DD" a timestamp UNIX
+	t, err := time.Parse("2006-01-02", n.Date)
+	if err != nil {
+		http.Error(w, "Formato de fecha inválido. Usá YYYY-MM-DD", http.StatusBadRequest)
+		return
+	}
+	timestamp := t.Unix()
+
 	lastID, err := h.DB.Insert(true, `
-		INSERT INTO news (slug, title, content) VALUES (?, ?, ?)`,
-		n.Slug, n.Title, n.Content,
+		INSERT INTO news (slug, title, content, date) VALUES (?, ?, ?, ?)`,
+		n.Slug, n.Title, n.Content, timestamp,
 	)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -364,6 +443,85 @@ func (h *AuthHandler) DeleteNews(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+func (h *AuthHandler) GetNewsDatatable(w http.ResponseWriter, r *http.Request) {
+	offsetParam := r.URL.Query().Get("offset")
+	limitParam := r.URL.Query().Get("limit")
+	search := r.URL.Query().Get("q")
+	sortBy := r.URL.Query().Get("sort")
+	order := r.URL.Query().Get("order")
+
+	idFilter := r.URL.Query().Get("id")
+	titleFilter := r.URL.Query().Get("title")
+	dateFilter := r.URL.Query().Get("date")
+
+	offset := 0
+	limit := 10
+	var err error
+
+	if offsetParam != "" {
+		offset, _ = strconv.Atoi(offsetParam)
+	}
+	if limitParam != "" {
+		limit, _ = strconv.Atoi(limitParam)
+	}
+
+	query := `
+		SELECT n.id, n.slug, n.date, n.title, n.content
+		FROM news n
+		WHERE 1=1
+	`
+	var queryParams []interface{}
+
+	if search != "" {
+		pattern := "%" + search + "%"
+		query += ` AND (n.title LIKE ? OR n.content LIKE ? OR n.slug LIKE ?)`
+		queryParams = append(queryParams, pattern, pattern, pattern)
+	}
+	if idFilter != "" {
+		query += " AND n.id LIKE ?"
+		queryParams = append(queryParams, "%"+idFilter+"%")
+	}
+	if titleFilter != "" {
+		query += " AND n.title LIKE ?"
+		queryParams = append(queryParams, "%"+titleFilter+"%")
+	}
+	if dateFilter != "" {
+		query += " AND n.date LIKE ?"
+		queryParams = append(queryParams, "%"+dateFilter+"%")
+	}
+
+	if sortBy != "" {
+		validSorts := map[string]bool{"id": true, "title": true, "date": true}
+		if validSorts[sortBy] {
+			if order != "desc" {
+				order = "asc"
+			}
+			query += fmt.Sprintf(" ORDER BY n.%s %s", sortBy, strings.ToUpper(order))
+		}
+	}
+
+	query += " LIMIT ? OFFSET ?"
+	queryParams = append(queryParams, limit, offset)
+
+	rows, err := h.DB.Select(query, queryParams...)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	var newsList []News
+	for rows.Next() {
+		var n News
+		if err := rows.Scan(&n.ID, &n.Slug, &n.Date, &n.Title, &n.Content); err != nil {
+			continue
+		}
+		newsList = append(newsList, n)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(newsList)
 }
 
 // Ayuda para chequear si es numérico

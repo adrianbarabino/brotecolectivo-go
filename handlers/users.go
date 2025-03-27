@@ -66,14 +66,14 @@ func (h *AuthHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 	salt := utils.GenerateSalt()
 	hashedPassword := utils.HashPassword(input.Password, salt)
 
-	id, err := h.DB.Insert(true, `INSERT INTO users (username, email, realName, password_hash, salt, role, provider) VALUES (?, ?, ?, ?, ?, 'usuario', 'local')`,
+	id, err := h.DB.Insert(true, `INSERT INTO users (username, email, realName, password_hash, salt, role, provider) VALUES (?, ?, ?, ?, ?, 'user', 'local')`,
 		input.Username, input.Email, input.Name, hashedPassword, salt)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	token, err := utils.GenerateAccessToken(int(id), input.Email, input.Name)
+	token, err := utils.GenerateAccessToken(int(id), input.Email, input.Name, "user")
 	if err != nil {
 		http.Error(w, "Error generando token", http.StatusInternalServerError)
 		return
@@ -154,7 +154,7 @@ func (h *AuthHandler) LoginUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, err := utils.GenerateAccessToken(user.ID, user.Email, user.Name)
+	token, err := utils.GenerateAccessToken(user.ID, user.Email, user.Name, user.Role)
 	if err != nil {
 		http.Error(w, "Error generando token", http.StatusInternalServerError)
 		return
@@ -193,7 +193,7 @@ func (h *AuthHandler) CreateOrLoginWithProvider(w http.ResponseWriter, r *http.R
 			Email:    input.Email,
 			Name:     normalizeUTF8(input.Name),
 
-			Role:     "usuario",
+			Role:     "user",
 			Provider: input.Provider,
 		}
 		id, err := h.DB.Insert(true, `INSERT INTO users (username, email, realName, role, provider) VALUES (?, ?, ?, ?, ?)`,
@@ -205,7 +205,7 @@ func (h *AuthHandler) CreateOrLoginWithProvider(w http.ResponseWriter, r *http.R
 		user.ID = int(id)
 	}
 
-	token, err := utils.GenerateAccessToken(user.ID, user.Email, user.Name)
+	token, err := utils.GenerateAccessToken(user.ID, user.Email, user.Name, user.Role)
 	if err != nil {
 		http.Error(w, "Error generando token", http.StatusInternalServerError)
 		return
@@ -215,6 +215,41 @@ func (h *AuthHandler) CreateOrLoginWithProvider(w http.ResponseWriter, r *http.R
 		"email": user.Email,
 		"name":  user.Name,
 		"role":  user.Role,
+	})
+}
+func (h *AuthHandler) CreateArtistLinkRequest(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		UserID   int    `json:"user_id"`
+		ArtistID int    `json:"artist_id"`
+		Rol      string `json:"rol"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		http.Error(w, "Datos inválidos", http.StatusBadRequest)
+		return
+	}
+
+	// Validaciones mínimas
+	if input.UserID == 0 || input.ArtistID == 0 || input.Rol == "" {
+		http.Error(w, "Faltan campos requeridos", http.StatusBadRequest)
+		return
+	}
+
+	// Insertar solicitud en la base
+	_, err := h.DB.Insert(false, `
+		INSERT INTO artist_links (user_id, artist_id, rol, status)
+		VALUES (?, ?, ?, 'pending')
+	`, input.UserID, input.ArtistID, input.Rol)
+
+	if err != nil {
+		http.Error(w, "Error al guardar la solicitud: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]string{
+		"status":  "ok",
+		"message": "Solicitud enviada",
 	})
 }
 

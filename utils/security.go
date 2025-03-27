@@ -17,6 +17,7 @@ import (
 
 	"github.com/golang-jwt/jwt"
 	"golang.org/x/crypto/argon2"
+	"gopkg.in/ini.v1"
 
 	"github.com/mailgun/mailgun-go/v4"
 )
@@ -65,12 +66,32 @@ func SetJwtKey(key []byte) {
 	JwtKey = key
 }
 
-func GenerateAccessToken(userID int, userName string, realName string) (string, error) {
+func LoadSpacesConfig() (accessKey, secretKey, region, endpoint, bucket string, err error) {
+	config, err := ini.Load("data.conf")
+	if err != nil {
+		return "", "", "", "", "", fmt.Errorf("no se pudo cargar data.conf: %v", err)
+	}
+
+	s := config.Section("spaces")
+	accessKey = s.Key("access_key").String()
+	secretKey = s.Key("secret_key").String()
+	region = s.Key("region").String()
+	endpoint = s.Key("endpoint").String()
+	bucket = s.Key("bucket").String()
+
+	if accessKey == "" || secretKey == "" || region == "" || endpoint == "" || bucket == "" {
+		return "", "", "", "", "", fmt.Errorf("faltan claves en la sección [spaces]")
+	}
+
+	return
+}
+func GenerateAccessToken(userID int, userName string, realName string, role string) (string, error) {
 	expirationTime := time.Now().Add(24 * time.Hour * 180) // 180 días
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"user_id":   userID,
 		"user_name": userName,
 		"real_name": realName,
+		"role":      role,
 		"exp":       expirationTime.Unix(),
 	})
 
