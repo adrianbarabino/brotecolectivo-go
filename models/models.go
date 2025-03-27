@@ -3,22 +3,10 @@ package models
 import (
 	"database/sql"
 	"encoding/json"
-	"time"
 
 	"github.com/golang-jwt/jwt"
 )
 
-type User struct {
-	ID           int            `json:"id"`
-	Username     string         `json:"username"`
-	Rank         int            `json:"rank"`
-	Email        string         `json:"email"`
-	Name         string         `json:"name,omitempty"`          // `omitempty` para que los valores nulos no aparezcan en el JSON
-	PasswordHash string         `json:"password_hash,omitempty"` // No se incluirá en las respuestas JSON
-	RecoveryHash sql.NullString `json:"recovery_hash,omitempty"` // Maneja NULL
-	CreatedAt    time.Time      `json:"created_at,omitempty"`
-	UpdatedAt    time.Time      `json:"updated_at,omitempty"`
-}
 type Item struct {
 	ID        int    `json:"id"`
 	Title     string `json:"title"`

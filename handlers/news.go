@@ -12,6 +12,7 @@ import (
 type News struct {
 	ID      int    `json:"id"`
 	Slug    string `json:"slug"`
+	Date    string `json:"date"`
 	Title   string `json:"title"`
 	Content string `json:"content"`
 	Bands   []Band `json:"bands,omitempty"`
@@ -19,13 +20,29 @@ type News struct {
 }
 
 func (h *AuthHandler) GetNews(w http.ResponseWriter, r *http.Request) {
+	pageStr := r.URL.Query().Get("page")
+	limit := 10 // cantidad de noticias por página
+	page := 1
+
+	if pageStr != "" {
+		p, err := strconv.Atoi(pageStr)
+		if err == nil && p > 0 {
+			page = p
+		}
+	}
+	offset := (page - 1) * limit
+
 	rows, err := h.DB.Select(`
-		SELECT n.id, n.slug, n.title, n.content, b.id, b.name, b.slug
-		FROM news n
-		LEFT JOIN news_bands nb ON n.id = nb.id_news
-		LEFT JOIN bands b ON nb.id_band = b.id
-		ORDER BY n.id DESC
-	`)
+	SELECT n.id, n.slug, n.date, n.title, n.content, b.id, b.name, b.slug
+	FROM (
+		SELECT * FROM news
+		ORDER BY id DESC
+		LIMIT ? OFFSET ?
+	) AS n
+	LEFT JOIN news_bands nb ON n.id = nb.id_news
+	LEFT JOIN bands b ON nb.id_band = b.id
+`, limit, offset)
+
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -36,11 +53,11 @@ func (h *AuthHandler) GetNews(w http.ResponseWriter, r *http.Request) {
 
 	for rows.Next() {
 		var nid int
-		var slug, title, content string
+		var slug, title, content, date string
 		var bID sql.NullInt64
 		var bName, bSlug sql.NullString
 
-		err := rows.Scan(&nid, &slug, &title, &content, &bID, &bName, &bSlug)
+		err := rows.Scan(&nid, &slug, &date, &title, &content, &bID, &bName, &bSlug)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -50,6 +67,7 @@ func (h *AuthHandler) GetNews(w http.ResponseWriter, r *http.Request) {
 			n := News{
 				ID:      nid,
 				Slug:    slug,
+				Date:    date,
 				Title:   title,
 				Content: content,
 				Bands:   []Band{},
@@ -77,7 +95,22 @@ func (h *AuthHandler) GetNews(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(allNews)
 
 }
+func (h *AuthHandler) GetNewsCount(w http.ResponseWriter, r *http.Request) {
+	row, err := h.DB.SelectRow("SELECT COUNT(*) FROM news")
+	if err != nil {
+		http.Error(w, "Error al contar noticias", http.StatusInternalServerError)
+		return
+	}
 
+	var count int
+	if err := row.Scan(&count); err != nil {
+		http.Error(w, "Error al leer el conteo", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]int{"count": count})
+}
 func (h *AuthHandler) GetNewsByID(w http.ResponseWriter, r *http.Request) {
 	idOrSlug := chi.URLParam(r, "id")
 
@@ -85,7 +118,7 @@ func (h *AuthHandler) GetNewsByID(w http.ResponseWriter, r *http.Request) {
 	var err error
 
 	query := `
-		SELECT n.id, n.slug, n.title, n.content, b.id, b.name, b.slug
+		SELECT n.id, n.slug, n.date, n.title, n.content, b.id, b.name, b.slug
 		FROM news n
 		LEFT JOIN news_bands nb ON n.id = nb.id_news
 		LEFT JOIN bands b ON nb.id_band = b.id
@@ -107,10 +140,11 @@ func (h *AuthHandler) GetNewsByID(w http.ResponseWriter, r *http.Request) {
 	var n *News
 	for rows.Next() {
 		var nid int
-		var slug, title, content string
-		var b Band
+		var slug, title, content, date string
+		var bID sql.NullInt64
+		var bName, bSlug sql.NullString
 
-		err := rows.Scan(&nid, &slug, &title, &content, &b.ID, &b.Name, &b.Slug)
+		err := rows.Scan(&nid, &slug, &date, &title, &content, &bID, &bName, &bSlug)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -120,13 +154,19 @@ func (h *AuthHandler) GetNewsByID(w http.ResponseWriter, r *http.Request) {
 			n = &News{
 				ID:      nid,
 				Slug:    slug,
+				Date:    date,
 				Title:   title,
 				Content: content,
 				Bands:   []Band{},
 			}
 		}
 
-		if b.ID != 0 {
+		if bID.Valid {
+			b := Band{
+				ID:   int(bID.Int64),
+				Name: bName.String,
+				Slug: bSlug.String,
+			}
 			n.Bands = append(n.Bands, b)
 		}
 	}
@@ -172,22 +212,12 @@ func (h *AuthHandler) CreateNews(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(n)
 }
 
-func (h *AuthHandler) GetNewsByBand(w http.ResponseWriter, r *http.Request) {
-	bandIDOrSlug := chi.URLParam(r, "band")
-
-	var bandID int
-	if isNumeric(bandIDOrSlug) {
-		bandID, _ = strconv.Atoi(bandIDOrSlug)
-	} else {
-		row, _ := h.DB.SelectRow("SELECT id FROM bands WHERE slug = ?", bandIDOrSlug)
-		if err := row.Scan(&bandID); err != nil {
-			http.Error(w, "Banda no encontrada", http.StatusNotFound)
-			return
-		}
-	}
+// get news by band id (not slug)
+func (h *AuthHandler) GetNewsByBandID(w http.ResponseWriter, r *http.Request) {
+	bandID := chi.URLParam(r, "id")
 
 	rows, err := h.DB.Select(`
-		SELECT n.id, n.slug, n.title, n.content, b.id, b.name, b.slug
+		SELECT n.id, n.date, n.slug, n.title, n.content, b.id, b.name, b.slug
 		FROM news n
 		JOIN news_bands nb ON n.id = nb.id_news
 		JOIN bands b ON nb.id_band = b.id
@@ -205,11 +235,11 @@ func (h *AuthHandler) GetNewsByBand(w http.ResponseWriter, r *http.Request) {
 
 	for rows.Next() {
 		var nid int
-		var slug, title, content string
+		var slug, title, content, date string
 		var bID sql.NullInt64
 		var bName, bSlug sql.NullString
 
-		err := rows.Scan(&nid, &slug, &title, &content, &bID, &bName, &bSlug)
+		err := rows.Scan(&nid, &date, &slug, &title, &content, &bID, &bName, &bSlug)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -219,6 +249,7 @@ func (h *AuthHandler) GetNewsByBand(w http.ResponseWriter, r *http.Request) {
 			n := News{
 				ID:      nid,
 				Slug:    slug,
+				Date:    date,
 				Title:   title,
 				Content: content,
 				Bands:   []Band{},

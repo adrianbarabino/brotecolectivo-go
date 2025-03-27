@@ -18,6 +18,23 @@ type Band struct {
 	Social map[string]string `json:"social"`
 }
 
+func (h *AuthHandler) GetBandsCount(w http.ResponseWriter, r *http.Request) {
+	row, err := h.DB.SelectRow("SELECT COUNT(*) FROM bands")
+	if err != nil {
+		http.Error(w, "Error al contar artistas", http.StatusInternalServerError)
+		return
+	}
+
+	var count int
+	if err := row.Scan(&count); err != nil {
+		http.Error(w, "Error al leer el conteo", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]int{"count": count})
+}
+
 func (h *AuthHandler) GetBands(w http.ResponseWriter, r *http.Request) {
 	offsetParam := r.URL.Query().Get("offset")
 	limitParam := r.URL.Query().Get("limit")

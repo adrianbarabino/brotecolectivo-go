@@ -102,7 +102,7 @@ func userExists(userID int) bool {
 	return userID != 0
 }
 
-func generateAccessToken(userID int, userName string) (string, error) {
+func generateAccessToken(userID int, userName string, realName string) (string, error) {
 
 	expirationTime := time.Now().Add(24 * time.Hour * 180) // El token expira en 90 días
 
@@ -110,6 +110,7 @@ func generateAccessToken(userID int, userName string) (string, error) {
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"user_id":   userID,
 		"user_name": userName,
+		"real_name": realName,
 		"exp":       expirationTime.Unix(),
 	})
 

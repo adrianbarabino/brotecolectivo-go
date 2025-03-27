@@ -21,46 +21,6 @@ func NewAuthHandler(db *database.DatabaseStruct) *AuthHandler {
 	return &AuthHandler{DB: db}
 }
 
-func (h *AuthHandler) LoginUser(w http.ResponseWriter, r *http.Request) {
-	var loginData struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&loginData); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	log.Printf("Intento de login con usuario: %s", loginData.Username)
-
-	var u models.User
-	var salt string
-
-	row, _ := h.DB.SelectRow("SELECT id, realName, username, password_hash, salt FROM users WHERE username = ?", loginData.Username)
-	err := row.Scan(&u.ID, &u.Name, &u.Username, &u.PasswordHash, &salt)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			http.Error(w, "Usuario no encontrado", http.StatusUnauthorized)
-		} else {
-			http.Error(w, "Error al procesar el login", http.StatusInternalServerError)
-		}
-		return
-	}
-
-	if !utils.ComparePasswords(u.PasswordHash, loginData.Password, salt) {
-		http.Error(w, "Credenciales inválidas", http.StatusUnauthorized)
-		return
-	}
-
-	accessToken, err := utils.GenerateAccessToken(u.ID, u.Name)
-	if err != nil {
-		http.Error(w, "Error al generar el Access Token", http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"access_token": accessToken})
-}
-
 func (h *AuthHandler) RequestPasswordRecovery(w http.ResponseWriter, r *http.Request) {
 	var requestData struct {
 		Email string `json:"email"`

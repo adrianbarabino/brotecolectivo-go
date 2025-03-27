@@ -138,6 +138,34 @@ func (h *AuthHandler) GetVideoByID(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(video)
 }
 
+func (h *AuthHandler) GetVideosByBandID(w http.ResponseWriter, r *http.Request) {
+	bandID := chi.URLParam(r, "id")
+	query := `
+		SELECT v.id, v.title, v.slug, v.id_youtube
+		FROM videos v
+		JOIN videos_bands vb ON v.id = vb.id_video
+		WHERE vb.id_band = ?
+	`
+	rows, err := h.DB.Select(query, bandID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	var videos []Video
+	for rows.Next() {
+		var v Video
+		if err := rows.Scan(&v.ID, &v.Title, &v.Slug, &v.YoutubeID); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		videos = append(videos, v)
+	}
+
+	json.NewEncoder(w).Encode(videos)
+}
+
 func (h *AuthHandler) CreateVideo(w http.ResponseWriter, r *http.Request) {
 	var v Video
 	if err := json.NewDecoder(r.Body).Decode(&v); err != nil {

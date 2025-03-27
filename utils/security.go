@@ -65,11 +65,12 @@ func SetJwtKey(key []byte) {
 	JwtKey = key
 }
 
-func GenerateAccessToken(userID int, userName string) (string, error) {
+func GenerateAccessToken(userID int, userName string, realName string) (string, error) {
 	expirationTime := time.Now().Add(24 * time.Hour * 180) // 180 días
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"user_id":   userID,
 		"user_name": userName,
+		"real_name": realName,
 		"exp":       expirationTime.Unix(),
 	})
 

@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -116,14 +117,32 @@ func (h *AuthHandler) GetEventByID(w http.ResponseWriter, r *http.Request) {
 	var e Event
 	var v Venue
 
-	row, err := h.DB.SelectRow(`
-		SELECT 
+	// check if id is numeric or is a slug
+	var row *sql.Row
+	var err error
+	if _, errConv := strconv.Atoi(id); errConv == nil {
+		// Es un número → buscar por ID
+		row, err = h.DB.SelectRow(`
+
+		SELECT
+
 			e.id, e.title, e.tags, e.content, e.slug, e.date_start, e.date_end,
 			v.id, v.name
 		FROM events e
 		JOIN venues v ON e.id_venue = v.id
 		WHERE e.id = ?
 	`, id)
+	} else {
+		// No es número → buscar por slug
+		row, err = h.DB.SelectRow(`
+		SELECT
+			e.id, e.title, e.tags, e.content, e.slug, e.date_start, e.date_end,
+			v.id, v.name
+		FROM events e
+		JOIN venues v ON e.id_venue = v.id
+		WHERE e.slug = ?
+	`, id)
+	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

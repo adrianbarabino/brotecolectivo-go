@@ -12,6 +12,7 @@ require (
 	github.com/mailgun/mailgun-go v2.0.0+incompatible
 	github.com/mailgun/mailgun-go/v4 v4.23.0
 	golang.org/x/crypto v0.36.0
+	golang.org/x/net v0.37.0
 	golang.org/x/time v0.11.0
 	gopkg.in/ini.v1 v1.67.0
 )
@@ -33,4 +34,5 @@ require (
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/rogpeppe/go-internal v1.9.0 // indirect
 	golang.org/x/sys v0.31.0 // indirect
+	golang.org/x/text v0.23.0 // indirect
 )

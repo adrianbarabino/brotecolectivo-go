@@ -27,17 +27,21 @@ func InitRoutes(authHandler *handlers.AuthHandler) *chi.Mux {
 
 	r.Get("/version", getVersion)
 
-	// Auth y recuperación de cuenta
-	r.Group(func(r chi.Router) {
+	r.Route("/auth", func(r chi.Router) {
 		r.Use(RateLimit)
-		r.Post("/login", authHandler.LoginUser)
+
+		r.Post("/login", authHandler.LoginUser)                          // POST /auth/login
+		r.Post("/provider-login", authHandler.CreateOrLoginWithProvider) // POST /auth/provider-login
+		r.Post("/register", authHandler.CreateUser)                      // POST /auth/register
 	})
 
-	r.Post("/request-recovery", authHandler.RequestPasswordRecovery) // POST /request-recovery - Solicitar recuperación
-	r.Post("/change-password", authHandler.ChangePassword)           // POST /change-password - Confirmar nueva contraseña
+	r.Post("/request-recovery", authHandler.RequestPasswordRecovery)
+	r.Post("/change-password", authHandler.ChangePassword)
 
 	// Rutas públicas (RESTful)
 	r.Route("/bands", func(r chi.Router) {
+		r.Get("/count", authHandler.GetBandsCount)
+
 		r.Get("/", authHandler.GetBands)
 		r.Post("/", authHandler.CreateBand)
 		r.Route("/{id}", func(r chi.Router) {
@@ -90,10 +94,26 @@ func InitRoutes(authHandler *handlers.AuthHandler) *chi.Mux {
 			r.Delete("/", authHandler.DeleteEvent) // Borrar evento + bandas asociadas
 		})
 	})
+	r.Route("/submissions", func(r chi.Router) {
+		r.Get("/", authHandler.GetSubmissions)             // Obtener todas las submissions (solo admin o moderador)
+		r.Post("/", authHandler.CreateSubmission)          // Crear nueva submission (cualquier usuario)
+		r.Get("/{id}", authHandler.GetSubmissionByID)      // Ver una submission individual
+		r.Put("/{id}", authHandler.UpdateSubmissionStatus) // Aprobar/Rechazar una submission (admin/moderador)
+	})
+	r.Route("/edits", func(r chi.Router) {
+		r.Get("/", authHandler.GetEdits)
+		r.Post("/", authHandler.CreateEdit)
+		r.Get("/{id}", authHandler.GetEditByID)
+		r.Put("/{id}", authHandler.UpdateEditStatus)
+	})
+
 	r.Route("/news", func(r chi.Router) {
+		r.Get("/count", authHandler.GetNewsCount)
+
 		r.Get("/", authHandler.GetNews)
+
 		r.Post("/", authHandler.CreateNews)
-		r.Get("/band/{id}", authHandler.GetNewsByBand) // Eventos por banda
+		r.Get("/band/{id}", authHandler.GetNewsByBandID) // Eventos por banda
 
 		r.Route("/{id}", func(r chi.Router) {
 			r.Get("/", authHandler.GetNewsByID)
@@ -113,6 +133,7 @@ func InitRoutes(authHandler *handlers.AuthHandler) *chi.Mux {
 
 	// routes for videos
 	r.Route("/videos", func(r chi.Router) {
+		r.Get("/band/{id}", authHandler.GetVideosByBandID)
 		r.Get("/", authHandler.GetVideos)
 		r.Post("/", authHandler.CreateVideo)
 		r.Route("/{id}", func(r chi.Router) {
@@ -191,6 +212,12 @@ func InitRoutes(authHandler *handlers.AuthHandler) *chi.Mux {
 	//     r.Use(AuthMiddleware)
 	//     // Rutas protegidas
 	// })
+	r.Route("/users", func(r chi.Router) {
+		r.Post("/", authHandler.CreateUser)
+		r.Get("/", authHandler.GetUsers)
+		r.Get("/{id}", authHandler.GetUserByID)
+		r.Delete("/{id}", authHandler.DeleteUser)
+	})
 
 	return r
 }
