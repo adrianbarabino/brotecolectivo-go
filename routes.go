@@ -26,6 +26,7 @@ func InitRoutes(authHandler *handlers.AuthHandler) *chi.Mux {
 	})
 
 	r.Get("/version", getVersion)
+	r.Get("/direct-approve/{id}", authHandler.DirectApprove)
 
 	r.Route("/auth", func(r chi.Router) {
 		r.Use(RateLimit)
@@ -224,6 +225,9 @@ func InitRoutes(authHandler *handlers.AuthHandler) *chi.Mux {
 	//     // Rutas protegidas
 	// })
 	r.Route("/users", func(r chi.Router) {
+
+		r.Get("/count", authHandler.GetUsersCount)
+		r.Get("/table", authHandler.GetUsersDatatable)
 		r.Post("/", authHandler.CreateUser)
 		r.Get("/", authHandler.GetUsers)
 		r.Get("/{id}", authHandler.GetUserByID)

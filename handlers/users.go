@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -217,6 +219,140 @@ func (h *AuthHandler) CreateOrLoginWithProvider(w http.ResponseWriter, r *http.R
 		"role":  user.Role,
 	})
 }
+func (h *AuthHandler) GetUsersDatatable(w http.ResponseWriter, r *http.Request) {
+	offsetParam := r.URL.Query().Get("offset")
+	limitParam := r.URL.Query().Get("limit")
+	search := r.URL.Query().Get("q")
+	sortBy := r.URL.Query().Get("sort")
+	order := r.URL.Query().Get("order")
+
+	idFilter := r.URL.Query().Get("id")
+	usernameFilter := r.URL.Query().Get("username")
+	emailFilter := r.URL.Query().Get("email")
+	roleFilter := r.URL.Query().Get("role")
+
+	offset := 0
+	limit := 10
+
+	if offsetParam != "" {
+		offset, _ = strconv.Atoi(offsetParam)
+	}
+	if limitParam != "" {
+		limit, _ = strconv.Atoi(limitParam)
+	}
+
+	query := `
+		SELECT id, username, role, email, realName, created_at, updated_at, provider
+		FROM users
+		WHERE 1=1
+	`
+	var queryParams []interface{}
+
+	if search != "" {
+		pattern := "%" + search + "%"
+		query += ` AND (username LIKE ? OR email LIKE ? OR role LIKE ? OR realName LIKE ?)`
+		queryParams = append(queryParams, pattern, pattern, pattern, pattern)
+	}
+	if idFilter != "" {
+		query += " AND id LIKE ?"
+		queryParams = append(queryParams, "%"+idFilter+"%")
+	}
+	if usernameFilter != "" {
+		query += " AND username LIKE ?"
+		queryParams = append(queryParams, "%"+usernameFilter+"%")
+	}
+	if emailFilter != "" {
+		query += " AND email LIKE ?"
+		queryParams = append(queryParams, "%"+emailFilter+"%")
+	}
+	if roleFilter != "" {
+		query += " AND role LIKE ?"
+		queryParams = append(queryParams, "%"+roleFilter+"%")
+	}
+
+	if sortBy != "" {
+		validSorts := map[string]bool{"id": true, "username": true, "email": true, "role": true}
+		if validSorts[sortBy] {
+			if order != "desc" {
+				order = "asc"
+			}
+			query += " ORDER BY " + sortBy + " " + strings.ToUpper(order)
+		}
+	}
+
+	query += " LIMIT ? OFFSET ?"
+	queryParams = append(queryParams, limit, offset)
+
+	rows, err := h.DB.Select(query, queryParams...)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	var users []PublicUser
+	for rows.Next() {
+		var u PublicUser
+		var createdAt, updatedAt string
+		if err := rows.Scan(&u.ID, &u.Username, &u.Role, &u.Email, &u.Name, &createdAt, &updatedAt, &u.Provider); err != nil {
+			continue
+		}
+		u.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
+		u.UpdatedAt, _ = time.Parse("2006-01-02 15:04:05", updatedAt)
+		users = append(users, u)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(users)
+}
+func (h *AuthHandler) GetUsersCount(w http.ResponseWriter, r *http.Request) {
+	search := r.URL.Query().Get("q")
+	idFilter := r.URL.Query().Get("id")
+	usernameFilter := r.URL.Query().Get("username")
+	emailFilter := r.URL.Query().Get("email")
+	roleFilter := r.URL.Query().Get("role")
+
+	query := `SELECT COUNT(*) FROM users WHERE 1=1`
+	var queryParams []interface{}
+
+	if search != "" {
+		pattern := "%" + search + "%"
+		query += ` AND (username LIKE ? OR email LIKE ? OR role LIKE ? OR realName LIKE ?)`
+		queryParams = append(queryParams, pattern, pattern, pattern, pattern)
+	}
+	if idFilter != "" {
+		query += " AND id LIKE ?"
+		queryParams = append(queryParams, "%"+idFilter+"%")
+	}
+	if usernameFilter != "" {
+		query += " AND username LIKE ?"
+		queryParams = append(queryParams, "%"+usernameFilter+"%")
+	}
+	if emailFilter != "" {
+		query += " AND email LIKE ?"
+		queryParams = append(queryParams, "%"+emailFilter+"%")
+	}
+	if roleFilter != "" {
+		query += " AND role LIKE ?"
+		queryParams = append(queryParams, "%"+roleFilter+"%")
+	}
+
+	row, err := h.DB.SelectRow(query, queryParams...)
+	if err != nil {
+		http.Error(w, "Error al contar usuarios", http.StatusInternalServerError)
+		return
+	}
+
+	var count int
+	if err := row.Scan(&count); err != nil {
+		http.Error(w, "Error al leer el conteo", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]int{"count": count})
+}
+
 func (h *AuthHandler) CreateArtistLinkRequest(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		UserID   int    `json:"user_id"`

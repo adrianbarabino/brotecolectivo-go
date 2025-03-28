@@ -14,12 +14,57 @@ import (
 	"os"
 	"strings"
 
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"strconv"
+
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/go-chi/chi/v5"
+	"gopkg.in/ini.v1"
 )
+
+func (h *AuthHandler) DirectApprove(w http.ResponseWriter, r *http.Request) {
+	idStr := chi.URLParam(r, "id")
+	token := r.URL.Query().Get("token")
+
+	cfg, err := ini.Load("data.conf")
+	if err != nil {
+		http.Error(w, "Config error", http.StatusInternalServerError)
+		return
+	}
+	secret := cfg.Section("security").Key("approval_secret").String()
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		http.Error(w, "ID inválido", http.StatusBadRequest)
+		return
+	}
+	expectedToken := generateApprovalToken(id, secret)
+
+	if token != expectedToken {
+		http.Error(w, "Token inválido", http.StatusUnauthorized)
+		return
+	}
+
+	// Forzamos reviewer_id = 1 (o alguno por default)
+	payload := struct {
+		ReviewerID int `json:"reviewer_id"`
+	}{ReviewerID: 1}
+
+	body, _ := json.Marshal(payload)
+	r.Body = io.NopCloser(bytes.NewReader(body))
+
+	h.ApproveSubmission(w, r)
+}
+
+func generateApprovalToken(submissionID int, secret string) string {
+	h := hmac.New(sha256.New, []byte(secret))
+	h.Write([]byte(strconv.Itoa(submissionID)))
+	return hex.EncodeToString(h.Sum(nil))
+}
 
 type Submission struct {
 	ID        int             `json:"id"`
@@ -31,6 +76,120 @@ type Submission struct {
 	Comment   string          `json:"comment,omitempty"`
 	CreatedAt string          `json:"created_at"`
 	UpdatedAt string          `json:"updated_at"`
+}
+
+func extractFieldsFromSubmission(sub Submission) (name, description, slug string, err error) {
+	switch sub.Type {
+	case "band":
+		var data struct {
+			Name string `json:"name"`
+			Bio  string `json:"bio"`
+			Slug string `json:"slug"`
+		}
+		err = json.Unmarshal(sub.Data, &data)
+		return data.Name, data.Bio, data.Slug, err
+
+	case "event":
+		var data struct {
+			Title   string `json:"title"`
+			Content string `json:"content"`
+			Slug    string `json:"slug"`
+		}
+		err = json.Unmarshal(sub.Data, &data)
+		return data.Title, data.Content, data.Slug, err
+
+	case "eventvenue":
+		var data struct {
+			Event struct {
+				Title   string `json:"title"`
+				Content string `json:"content"`
+				Slug    string `json:"slug"`
+			} `json:"event"`
+		}
+		err = json.Unmarshal(sub.Data, &data)
+		return data.Event.Title, data.Event.Content, data.Event.Slug, err
+
+	default:
+		return "Desconocido", "Sin descripción", "unknown", nil
+	}
+}
+
+func sendSubmissionWhatsApp(phone string, sub Submission, name, description, slug string, cfg *ini.File) error {
+	imageURL := fmt.Sprintf("https://brotecolectivo.sfo3.cdn.digitaloceanspaces.com/pending/%s.jpg", slug)
+	viewURL := fmt.Sprintf("%d", sub.ID)
+	// Generar token con la secret
+	secret := cfg.Section("security").Key("approval_secret").String()
+	token := generateApprovalToken(sub.ID, secret)
+	approveURLWithToken := fmt.Sprintf("%d?token=%s", sub.ID, token)
+
+	message := map[string]interface{}{
+		"messaging_product": "whatsapp",
+		"to":                phone,
+		"type":              "template",
+		"template": map[string]interface{}{
+			"name": "nueva_colaboracion_brotecolectivo",
+			"language": map[string]interface{}{
+				"code": "es",
+			},
+			"components": []map[string]interface{}{
+				{
+					"type": "header",
+					"parameters": []map[string]interface{}{
+						{
+							"type": "image",
+							"image": map[string]string{
+								"link": imageURL,
+							},
+						},
+					},
+				},
+				{
+					"type": "body",
+					"parameters": []map[string]interface{}{
+						{"type": "text", "text": sub.Type},
+						{"type": "text", "text": fmt.Sprintf("%d", sub.UserID)},
+						{"type": "text", "text": name},
+						{"type": "text", "text": description},
+					},
+				},
+				{
+					"type":     "button",
+					"sub_type": "url",
+					"index":    0,
+					"parameters": []map[string]interface{}{
+						{"type": "text", "text": approveURLWithToken},
+					},
+				},
+				{
+					"type":     "button",
+					"sub_type": "url",
+					"index":    1,
+					"parameters": []map[string]interface{}{
+						{"type": "text", "text": viewURL},
+					},
+				},
+			},
+		},
+	}
+
+	jsonData, _ := json.Marshal(message)
+
+	req, _ := http.NewRequest("POST", fmt.Sprintf("https://graph.facebook.com/v17.0/%s/messages", cfg.Section("keys").Key("whatsapp_number").String()), bytes.NewBuffer(jsonData))
+	req.Header.Set("Authorization", "Bearer "+cfg.Section("keys").Key("whatsapp_token").String())
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("WhatsApp API error: %s", string(body))
+	}
+	return nil
 }
 
 func (h *AuthHandler) GetSubmissions(w http.ResponseWriter, r *http.Request) {
@@ -195,7 +354,8 @@ func (h *AuthHandler) ApproveSubmission(w http.ResponseWriter, r *http.Request) 
 			VALUES (?, ?, ?, ?, ?, ?)`,
 			venue.Name, venue.Address, venue.Description, venue.Slug, venue.LatLng, venue.City)
 		if err != nil {
-			http.Error(w, "Error al crear venue", http.StatusInternalServerError)
+			// dame un error mas detallado que el de arriba
+			http.Error(w, "Error al crear venue: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 
@@ -388,7 +548,6 @@ func (h *AuthHandler) UploadSubmissionImage(w http.ResponseWriter, r *http.Reque
 		"slug":   slug,
 	})
 }
-
 func (h *AuthHandler) CreateSubmission(w http.ResponseWriter, r *http.Request) {
 	var s Submission
 	if err := json.NewDecoder(r.Body).Decode(&s); err != nil {
@@ -404,6 +563,24 @@ func (h *AuthHandler) CreateSubmission(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.ID = int(id)
+
+	// asignar el RawMessage para poder usar extractFields
+	s.Data = json.RawMessage(s.Data)
+
+	// cargar configuración desde data.conf
+	cfg, err := ini.Load("data.conf")
+	if err == nil {
+		// extraer campos y mandar WhatsApp
+		name, description, slug, err := extractFieldsFromSubmission(s)
+		if err == nil {
+			// número del admin al que querés mandar el mensaje
+			adminPhone := cfg.Section("keys").Key("admin_phone").String()
+			if adminPhone != "" {
+				go sendSubmissionWhatsApp(adminPhone, s, name, description, slug, cfg)
+			}
+		}
+	}
+
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(s)
 }
