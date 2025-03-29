@@ -94,22 +94,24 @@ func InitRoutes(authHandler *handlers.AuthHandler) *chi.Mux {
 	// Grupo de rutas para eventos
 	r.Route("/events", func(r chi.Router) {
 		// Endpoints auxiliares
-		r.Get("/count", authHandler.GetEventsCount)           // Obtener conteo total de eventos
-		r.Get("/table", authHandler.GetEventsDatatable)       // Datos para DataTables
-		r.Post("/upload-image", authHandler.UploadEventImage) // Subir imagen de evento
+		r.Get("/count", authHandler.GetEventsCount)     // Obtener conteo total de eventos
+		r.Get("/table", authHandler.GetEventsDatatable) // Datos para DataTables
 
-		// CRUD principal
+		r.Get("/slug/{slug}", authHandler.CheckEventSlug) // Verificar disponibilidad de slug
+
 		r.Get("/", authHandler.GetEvents)    // Listar todos los eventos
 		r.Post("/", authHandler.CreateEvent) // Crear nuevo evento
 
-		// Endpoints de relación
+		r.With(AuthMiddleware).Get("/user/{user_id}", authHandler.GetUserEvents) // Obtener eventos vinculados a un usuario
+
 		r.Get("/band/{id}", authHandler.GetEventsByBandID)   // Eventos por banda
 		r.Get("/venue/{id}", authHandler.GetEventsByVenueID) // Eventos por venue
 
 		r.Route("/{id}", func(r chi.Router) {
-			r.Get("/", authHandler.GetEventByID)   // Obtener detalles de evento
-			r.Put("/", authHandler.UpdateEvent)    // Actualizar evento
-			r.Delete("/", authHandler.DeleteEvent) // Eliminar evento
+			r.Get("/", authHandler.GetEventByID)       // Obtener detalles de evento
+			r.Put("/", authHandler.UpdateEvent)        // Actualizar evento
+			r.Delete("/", authHandler.DeleteEvent)     // Eliminar evento
+			r.Get("/bands", authHandler.GetEventBands) // Obtener bandas asociadas al evento
 		})
 	})
 
@@ -164,6 +166,7 @@ func InitRoutes(authHandler *handlers.AuthHandler) *chi.Mux {
 			r.Put("/", authHandler.UpdateVenue)        // Actualizar venue
 			r.Delete("/", authHandler.DeleteVenue)     // Eliminar venue
 		})
+		r.With(AuthMiddleware).Get("/user/{user_id}", authHandler.GetUserVenues) // Obtener venues vinculados a un usuario
 	})
 
 	// Grupo de rutas para videos

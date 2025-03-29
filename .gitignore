@@ -3,3 +3,4 @@ dump.sql
 social_logs.sql
 social_config.ini
 brotecolectivo.exe
+sql/create_event_venue_links.sql

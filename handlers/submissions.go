@@ -489,6 +489,8 @@ func sendSubmissionWhatsApp(phone string, sub Submission, name, description, slu
 		viewURL = fmt.Sprintf("https://brotecolectivo.com/artista/%s", slug)
 	case "event":
 		viewURL = fmt.Sprintf("https://brotecolectivo.com/agenda-cultural/%s", slug)
+	case "eventvenue":
+		viewURL = fmt.Sprintf("https://brotecolectivo.com/agenda-cultural/%s", slug)
 	case "news":
 		viewURL = fmt.Sprintf("https://brotecolectivo.com/noticias/%s", slug)
 	case "song":
@@ -533,6 +535,14 @@ func sendSubmissionWhatsApp(phone string, sub Submission, name, description, slu
 		userIDStr = "1" // Valor predeterminado para evitar errores
 	}
 
+	// Personalizar la descripción según el tipo de submission
+	customDescription := description
+	if sub.Type == "event" || sub.Type == "eventvenue" {
+		customDescription = fmt.Sprintf("EVENTO: %s (ID: %d)", description, sub.ID)
+	} else {
+		customDescription = fmt.Sprintf("%s (ID: %d)", description, sub.ID)
+	}
+
 	imageURL := fmt.Sprintf("https://brotecolectivo.sfo3.cdn.digitaloceanspaces.com/pending/%s.jpg", slug)
 	// Debug de URLs
 	fmt.Printf("[WhatsApp Debug] URLs generadas: imageURL=%s, approveURL=%s\n",
@@ -565,7 +575,7 @@ func sendSubmissionWhatsApp(phone string, sub Submission, name, description, slu
 						{"type": "text", "text": submissionType},
 						{"type": "text", "text": userIDStr},
 						{"type": "text", "text": name},
-						{"type": "text", "text": description},
+						{"type": "text", "text": customDescription},
 					},
 				},
 				{
@@ -893,6 +903,19 @@ func (h *AuthHandler) ApproveSubmission(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 
+		// Crear vinculación automática entre el usuario que envió el venue y el venue creado
+		if submissionUserID > 0 && venueID > 0 {
+			fmt.Println("Creando vinculación automática para venue: UserID=", submissionUserID, "VenueID=", venueID)
+			_, linkErr := h.DB.Insert(false, `INSERT INTO venue_links (user_id, venue_id, rol, status) VALUES (?, ?, ?, 'approved')`,
+				submissionUserID, venueID, "creador")
+			if linkErr != nil {
+				fmt.Println("Error al crear vinculación automática para venue:", linkErr)
+				// No interrumpimos el flujo principal, solo registramos el error
+			} else {
+				fmt.Println("Vinculación automática para venue creada correctamente")
+			}
+		}
+
 		// Parsear Event
 		event := Event{
 			Title:     raw.Event["title"].(string),
@@ -916,6 +939,19 @@ func (h *AuthHandler) ApproveSubmission(w http.ResponseWriter, r *http.Request) 
 		_ = moveImageInSpaces("pending/"+event.Slug+".jpg", "events/"+event.Slug+".jpg")
 		_, _ = h.DB.Update(false, `UPDATE submissions SET status = 'approved', reviewed_by = ? WHERE id = ?`, payload.ReviewerID, id)
 
+		// Crear vinculación automática entre el usuario que envió el evento y el evento creado
+		if submissionUserID > 0 && eventID > 0 {
+			fmt.Println("Creando vinculación automática para evento: UserID=", submissionUserID, "EventID=", eventID)
+			_, linkErr := h.DB.Insert(false, `INSERT INTO event_links (user_id, event_id, rol, status) VALUES (?, ?, ?, 'approved')`,
+				submissionUserID, eventID, "creador")
+			if linkErr != nil {
+				fmt.Println("Error al crear vinculación automática para evento:", linkErr)
+				// No interrumpimos el flujo principal, solo registramos el error
+			} else {
+				fmt.Println("Vinculación automática para evento creada correctamente")
+			}
+		}
+
 		// Publicar en redes sociales
 		imagePath := "events/" + event.Slug + ".jpg"
 		go func() {
@@ -931,18 +967,39 @@ func (h *AuthHandler) ApproveSubmission(w http.ResponseWriter, r *http.Request) 
 		json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "event_id": eventID, "venue_id": venueID})
 
 	case "event":
-		var event Event
-		if err := json.Unmarshal(dataRaw, &event); err != nil {
-			http.Error(w, "Error al parsear datos", http.StatusBadRequest)
+		var eventData map[string]interface{}
+		fmt.Println("dataRaw:", string(dataRaw))
+
+		if err := json.Unmarshal(dataRaw, &eventData); err != nil {
+			http.Error(w, "Error al parsear datos: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		// Determine venue ID safely
-		var venueID int
-		if event.Venue != nil {
-			venueID = event.Venue.ID
-		} else {
-			venueID = event.VenueID
+
+		// Crear un evento con los datos disponibles
+		event := Event{
+			Title:     eventData["title"].(string),
+			Slug:      eventData["slug"].(string),
+			Tags:      eventData["tags"].(string),
+			Content:   eventData["content"].(string),
+			DateStart: eventData["date_start"].(string),
+			DateEnd:   eventData["date_end"].(string),
 		}
+
+		// Manejar el id_venue que puede estar vacío
+		var venueID int
+		if idVenue, ok := eventData["id_venue"].(string); ok && idVenue != "" {
+			venueID, _ = strconv.Atoi(idVenue)
+		} else if idVenue, ok := eventData["id_venue"].(float64); ok {
+			venueID = int(idVenue)
+		} else {
+			// Si no hay venue, usar un venue por defecto o mostrar error
+			fmt.Println("Advertencia: id_venue está vacío o no es válido, usando venue por defecto")
+			// Aquí podrías usar un venue por defecto o crear uno nuevo
+			// Por ahora, usaremos el ID 1 como venue por defecto
+			venueID = 1
+		}
+
+		fmt.Println("Usando venueID:", venueID)
 
 		eventID, err := h.DB.Insert(false, `
 		INSERT INTO events (id_venue, title, tags, content, slug, date_start, date_end)
@@ -950,14 +1007,52 @@ func (h *AuthHandler) ApproveSubmission(w http.ResponseWriter, r *http.Request) 
 			venueID, event.Title, event.Tags, event.Content, event.Slug, event.DateStart, event.DateEnd)
 
 		if err != nil {
-			http.Error(w, "Error al crear evento", http.StatusInternalServerError)
+			http.Error(w, "Error al crear evento: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		for _, band := range event.Bands {
-			_, _ = h.DB.Insert(false, `INSERT INTO events_bands (id_event, id_band) VALUES (?, ?)`, eventID, band.ID)
+
+		// Manejar band_ids que puede ser un array
+		if bandIDs, ok := eventData["band_ids"].([]interface{}); ok {
+			for _, bandID := range bandIDs {
+				var bandIDInt int
+				switch v := bandID.(type) {
+				case float64:
+					bandIDInt = int(v)
+				case string:
+					bandIDInt, _ = strconv.Atoi(v)
+				case int:
+					bandIDInt = v
+				}
+
+				if bandIDInt > 0 {
+					_, err := h.DB.Insert(false, `INSERT INTO events_bands (id_event, id_band) VALUES (?, ?)`,
+						eventID, bandIDInt)
+					if err != nil {
+						fmt.Println("Error al vincular banda", bandIDInt, "al evento", eventID, ":", err)
+					}
+				}
+			}
 		}
+
 		_ = moveImageInSpaces("pending/"+event.Slug+".jpg", "events/"+event.Slug+".jpg")
 		_, _ = h.DB.Update(false, `UPDATE submissions SET status = 'approved', reviewed_by = ? WHERE id = ?`, payload.ReviewerID, id)
+
+		// print submissionUserID and eventID
+		fmt.Println("submissionUserID:", submissionUserID)
+		fmt.Println("eventID:", eventID)
+
+		// Crear vinculación automática entre el usuario que envió el evento y el evento creado
+		if submissionUserID > 0 && eventID > 0 {
+			fmt.Println("Creando vinculación automática para evento: UserID=", submissionUserID, "EventID=", eventID)
+			_, linkErr := h.DB.Insert(false, `INSERT INTO event_links (user_id, event_id, rol, status) VALUES (?, ?, ?, 'approved')`,
+				submissionUserID, eventID, "creador")
+			if linkErr != nil {
+				fmt.Println("Error al crear vinculación automática para evento:", linkErr)
+				// No interrumpimos el flujo principal, solo registramos el error
+			} else {
+				fmt.Println("Vinculación automática para evento creada correctamente")
+			}
+		}
 
 		// Publicar en redes sociales
 		imagePath := "events/" + event.Slug + ".jpg"
@@ -1364,7 +1459,20 @@ func (h *AuthHandler) UploadSubmissionImage(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	key := fmt.Sprintf("pending/%s.jpg", slug)
+	// Determinar la carpeta de destino (pending por defecto, o la especificada)
+	destination := r.FormValue("destination")
+	var key string
+
+	if destination != "" {
+		// Si se especifica un destino, usar ese (events, bands, venues, etc.)
+		key = fmt.Sprintf("%s/%s.jpg", destination, slug)
+		fmt.Printf("Guardando imagen en carpeta específica: %s\n", key)
+	} else {
+		// Por defecto, guardar en pending
+		key = fmt.Sprintf("pending/%s.jpg", slug)
+		fmt.Printf("Guardando imagen en carpeta pending: %s\n", key)
+	}
+
 	err = uploadToSpaces(tmpPath, key, "image/jpeg")
 	if err != nil {
 		http.Error(w, "Error al subir a Spaces: "+err.Error(), http.StatusInternalServerError)
@@ -1402,6 +1510,10 @@ func (h *AuthHandler) CreateSubmission(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		// extraer campos y mandar WhatsApp
 		name, description, slug, err := extractFieldsFromSubmission(s)
+
+		// print name, description, slug
+		fmt.Printf("[Debug] CreateSubmission - name=%s, description=%s, slug=%s\n", name, description, slug)
+
 		if err == nil {
 			// número del admin al que querés mandar el mensaje
 			adminPhone := cfg.Section("keys").Key("admin_phone").String()

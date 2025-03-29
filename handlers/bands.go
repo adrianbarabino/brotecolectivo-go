@@ -353,6 +353,9 @@ func (h *AuthHandler) GetBands(w http.ResponseWriter, r *http.Request) {
 			}
 			query += fmt.Sprintf(" ORDER BY %s %s", sortBy, strings.ToUpper(order))
 		}
+	} else {
+		// Por defecto, ordenar por ID descendente (del más nuevo al más viejo)
+		query += " ORDER BY id DESC"
 	}
 
 	query += " LIMIT ? OFFSET ?"

@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 
+	"brotecolectivo/models"
+
 	"github.com/go-chi/chi/v5"
 )
 
@@ -312,7 +314,7 @@ func (h *AuthHandler) GetEvents(w http.ResponseWriter, r *http.Request) {
 					bands = append(bands, b)
 				}
 			}
-			bandRows.Close() // 
+			bandRows.Close()
 			e.Bands = bands
 		}
 
@@ -528,6 +530,73 @@ func (h *AuthHandler) GetEventsByBandID(w http.ResponseWriter, r *http.Request) 
 	json.NewEncoder(w).Encode(events)
 }
 
+// GetEventBands devuelve todas las bandas asociadas a un evento específico.
+//
+// @Summary Obtener bandas de un evento
+// @Description Obtiene todas las bandas que participan en un evento específico
+// @Tags eventos
+// @Produce json
+// @Param id path int true "ID del evento"
+// @Success 200 {array} Band "Lista de bandas del evento"
+// @Failure 400 {string} string "Error en la solicitud"
+// @Failure 404 {string} string "Evento no encontrado"
+// @Failure 500 {string} string "Error interno del servidor"
+// @Router /events/{id}/bands [get]
+func (h *AuthHandler) GetEventBands(w http.ResponseWriter, r *http.Request) {
+	eventID := chi.URLParam(r, "id")
+
+	// Verificar que el evento existe
+	var exists bool
+	row, err := h.DB.SelectRow("SELECT EXISTS(SELECT 1 FROM events WHERE id = ?)", eventID)
+	if err != nil {
+		http.Error(w, "Error al verificar evento: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := row.Scan(&exists); err != nil {
+		http.Error(w, "Error al escanear resultado: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !exists {
+		http.Error(w, "Evento no encontrado", http.StatusNotFound)
+		return
+	}
+
+	// Obtener bandas asociadas al evento
+	query := `
+		SELECT b.id, b.name, b.bio, b.slug
+		FROM bands b
+		JOIN events_bands eb ON b.id = eb.id_band
+		WHERE eb.id_event = ?
+	`
+
+	rows, err := h.DB.Select(query, eventID)
+	if err != nil {
+		http.Error(w, "Error al obtener bandas: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	var bands []Band
+	for rows.Next() {
+		var b Band
+
+		if err := rows.Scan(&b.ID, &b.Name, &b.Bio, &b.Slug); err != nil {
+			http.Error(w, "Error al escanear bandas: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		bands = append(bands, b)
+	}
+
+	// Si no hay bandas, devolver array vacío en lugar de null
+	if bands == nil {
+		bands = []Band{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(bands)
+}
+
 // UploadEventImage maneja la subida de imágenes para eventos.
 //
 // @Summary Subir imagen de evento
@@ -608,6 +677,14 @@ func (h *AuthHandler) CreateEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Obtener el ID del usuario autenticado
+	claims, ok := r.Context().Value("user").(*models.Claims)
+	if !ok {
+		http.Error(w, "Usuario no autenticado", http.StatusUnauthorized)
+		return
+	}
+	userID := claims.UserID
+
 	// Insertar el evento
 	eventID, err := h.DB.Insert(false, `
 		INSERT INTO events (id_venue, title, tags, content, slug, date_start, date_end)
@@ -627,6 +704,15 @@ func (h *AuthHandler) CreateEvent(w http.ResponseWriter, r *http.Request) {
 			// No detiene el proceso si falla una banda
 			fmt.Printf("Error insertando banda %d: %v\n", bandID, err)
 		}
+	}
+
+	// Vincular el evento con el usuario que lo creó
+	_, linkErr := h.DB.Insert(false, `
+		INSERT INTO event_links (user_id, event_id, rol, status) 
+		VALUES (?, ?, 'owner', 'approved')`,
+		userID, eventID)
+	if linkErr != nil {
+		fmt.Printf("Error al vincular evento %d con usuario %d: %v\n", eventID, userID, linkErr)
 	}
 
 	// Devolver el evento creado
@@ -733,4 +819,154 @@ func (h *AuthHandler) DeleteEvent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// GetUserEvents obtiene los eventos vinculados a un usuario específico.
+//
+// @Summary Obtener eventos de un usuario
+// @Description Obtiene los eventos vinculados a un usuario específico
+// @Tags eventos
+// @Accept json
+// @Produce json
+// @Param user_id path int true "ID del usuario"
+// @Success 200 {array} Event "Lista de eventos vinculados al usuario"
+// @Failure 400 {string} string "ID inválido"
+// @Failure 500 {string} string "Error al obtener los eventos"
+// @Security BearerAuth
+// @Router /events/user/{user_id} [get]
+func (h *AuthHandler) GetUserEvents(w http.ResponseWriter, r *http.Request) {
+	// Configurar encabezados para JSON
+	w.Header().Set("Content-Type", "application/json")
+
+	userID := chi.URLParam(r, "user_id")
+
+	// Verificar que el usuario autenticado tenga permiso para ver estos eventos
+	claims, ok := r.Context().Value("user").(*models.Claims)
+	if !ok {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Usuario no autenticado"})
+		return
+	}
+
+	// Convertir userID de string a uint para comparar con claims.UserID
+	userIDUint, err := strconv.ParseUint(userID, 10, 32)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "ID de usuario inválido"})
+		return
+	}
+
+	// Solo permitir acceso si es el mismo usuario o es admin
+	if claims.UserID != uint(userIDUint) && claims.Role != "admin" {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]string{"error": "No tienes permiso para ver estos eventos"})
+		return
+	}
+
+	// Consultar los eventos vinculados al usuario
+	rows, err := h.DB.Select(`
+		SELECT e.id, e.title, e.tags, e.content, e.slug, e.date_start, e.date_end, e.id_venue, v.name, v.address, v.slug, el.rol
+		FROM events e
+		JOIN event_links el ON e.id = el.event_id
+		JOIN venues v ON e.id_venue = v.id
+		WHERE el.user_id = ? AND el.status = 'approved'
+		ORDER BY e.date_start DESC`, userID)
+
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Error al consultar los eventos: " + err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	events := []Event{}
+
+	for rows.Next() {
+		var event Event
+		var venue Venue
+		var rol string
+
+		if err := rows.Scan(
+			&event.ID, &event.Title, &event.Tags, &event.Content, &event.Slug,
+			&event.DateStart, &event.DateEnd, &event.VenueID,
+			&venue.Name, &venue.Address, &venue.Slug, &rol); err != nil {
+			continue // Saltamos este registro si hay error
+		}
+
+		// Asignar el venue al evento
+		event.Venue = &venue
+
+		// Obtener las bandas asociadas al evento
+		bandRows, err := h.DB.Select(`
+			SELECT b.id, b.name, b.slug
+			FROM bands b
+			JOIN events_bands eb ON b.id = eb.id_band
+			WHERE eb.id_event = ?`, event.ID)
+		if err == nil {
+			var bands []Band
+			for bandRows.Next() {
+				var band Band
+				if err := bandRows.Scan(&band.ID, &band.Name, &band.Slug); err == nil {
+					bands = append(bands, band)
+				}
+			}
+			bandRows.Close()
+			event.Bands = bands
+		}
+
+		events = append(events, event)
+	}
+
+	json.NewEncoder(w).Encode(events)
+}
+
+// CheckEventSlug verifica si un slug de evento ya existe en la base de datos.
+//
+// @Summary Verifica disponibilidad de slug
+// @Description Comprueba si un slug de evento ya está en uso
+// @Tags eventos
+// @Accept json
+// @Produce json
+// @Param slug path string true "Slug a verificar"
+// @Success 200 {object} map[string]bool "Slug existe"
+// @Failure 400 {string} string "Error: Falta el slug"
+// @Failure 404 {string} string "Slug disponible"
+// @Failure 500 {string} string "Error al consultar la base de datos"
+// @Router /events/slug/{slug} [get]
+func (h *AuthHandler) CheckEventSlug(w http.ResponseWriter, r *http.Request) {
+	// Configurar encabezados para JSON
+	w.Header().Set("Content-Type", "application/json")
+
+	// Obtener el slug de la URL
+	slug := chi.URLParam(r, "slug")
+	if slug == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Falta el slug"})
+		return
+	}
+
+	// Verificar si el slug ya existe
+	row, err := h.DB.SelectRow("SELECT EXISTS(SELECT 1 FROM events WHERE slug = ?)", slug)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Error al consultar la base de datos: " + err.Error()})
+		return
+	}
+
+	var exists bool
+	if err := row.Scan(&exists); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Error al leer el resultado: " + err.Error()})
+		return
+	}
+
+	if exists {
+		// El slug ya existe
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]bool{"exists": true})
+	} else {
+		// El slug está disponible
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]bool{"exists": false})
+	}
 }
