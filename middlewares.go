@@ -2,6 +2,8 @@ package main
 
 import (
 	"brotecolectivo/models"
+	"context"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -20,9 +22,16 @@ func AuthMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Verificamos si el token es "token-secreto" y lo salteamos
-		if authHeader == "token-secreto" {
-			next.ServeHTTP(w, r)
+		// Verificamos si el token es "Bearer token-secreto" y lo salteamos
+		if authHeader == "Bearer token-secreto" {
+			// Para depuración, crear claims temporales
+			fmt.Println("[DEBUG] Usando token de depuración")
+			tempClaims := &models.Claims{
+				UserID: 1,       // ID de usuario por defecto para depuración
+				Role:   "admin", // Rol por defecto para depuración
+			}
+			ctx := context.WithValue(r.Context(), "user", tempClaims)
+			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
 
@@ -37,11 +46,15 @@ func AuthMiddleware(next http.Handler) http.Handler {
 		tokenString := tokenParts[1]
 		claims := &models.Claims{}
 
+		fmt.Printf("[DEBUG] Intentando validar token: %s\n", tokenString[:10]+"...")
+
 		token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
+			fmt.Printf("[DEBUG] Método de firma del token: %v\n", token.Method)
 			return jwtKey, nil
 		})
 
 		if err != nil {
+			fmt.Printf("[DEBUG] Error al validar token: %v\n", err)
 			if err == jwt.ErrSignatureInvalid {
 				http.Error(w, "No autorizado. Token de autenticación inválido.", http.StatusUnauthorized)
 				return
@@ -50,12 +63,17 @@ func AuthMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		if !token.Valid {
+			fmt.Printf("[DEBUG] Token inválido\n")
 			http.Error(w, "No autorizado. Token de autenticación inválido.", http.StatusUnauthorized)
 			return
 		}
 
+		fmt.Printf("[DEBUG] Token válido para usuario ID: %d, Rol: %s\n", claims.UserID, claims.Role)
+
 		// Si el token es válido, pasamos al siguiente middleware o controlador
-		next.ServeHTTP(w, r)
+		// Guardar los claims en el contexto para que los controladores puedan acceder a ellos
+		ctx := context.WithValue(r.Context(), "user", claims)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 

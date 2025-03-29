@@ -29,26 +29,51 @@ import (
 )
 
 func (h *AuthHandler) DirectApprove(w http.ResponseWriter, r *http.Request) {
+	// Diagnóstico de tabla artist_links
+	h.DB.CheckArtistLinksTable()
+
 	idStr := chi.URLParam(r, "id")
 	token := r.URL.Query().Get("token")
 
+	// Agregar logs para depuración
+	fmt.Println("DirectApprove - ID recibido:", idStr)
+	fmt.Println("DirectApprove - Token recibido:", token)
+
 	cfg, err := ini.Load("data.conf")
 	if err != nil {
+		fmt.Println("DirectApprove - Error al cargar config:", err)
 		http.Error(w, "Config error", http.StatusInternalServerError)
 		return
 	}
+
+	// Intentar obtener el secreto de la sección security primero
 	secret := cfg.Section("security").Key("approval_secret").String()
+	if secret == "" {
+		// Intentar obtener de la sección keys como fallback
+		secret = cfg.Section("keys").Key("approval_secret").String()
+		fmt.Println("DirectApprove - Secret obtenido de la sección 'keys'")
+	} else {
+		fmt.Println("DirectApprove - Secret obtenido de la sección 'security'")
+	}
+
+	fmt.Println("DirectApprove - Secret cargado (longitud):", len(secret))
+
 	id, err := strconv.Atoi(idStr)
 	if err != nil {
+		fmt.Println("DirectApprove - Error al convertir ID a entero:", err)
 		http.Error(w, "ID inválido", http.StatusBadRequest)
 		return
 	}
 	expectedToken := generateApprovalToken(id, secret)
+	fmt.Println("DirectApprove - Token esperado:", expectedToken)
 
 	if token != expectedToken {
+		fmt.Println("DirectApprove - Token inválido. Recibido:", token, "Esperado:", expectedToken)
 		http.Error(w, "Token inválido", http.StatusUnauthorized)
 		return
 	}
+
+	fmt.Println("DirectApprove - Token válido, continuando con la aprobación")
 
 	// Get submission info before approval to determine type and details
 	row, err := h.DB.SelectRow("SELECT type, data FROM submissions WHERE id = ? AND status = 'pending'", idStr)
@@ -65,7 +90,7 @@ func (h *AuthHandler) DirectApprove(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Extract content details
-	name, description, slug, _ := extractFieldsFromSubmission(Submission{
+	name, description, slug, err := extractFieldsFromSubmission(Submission{
 		ID:   id,
 		Type: subType,
 		Data: dataRaw,
@@ -99,46 +124,41 @@ func (h *AuthHandler) DirectApprove(w http.ResponseWriter, r *http.Request) {
 
 	// Determine content type and ID
 	var contentID int
-	var contentType, viewURL string
+	var viewURL string
 
 	// Set default values to prevent MISSING errors
-	contentType = "contenido"
-	viewURL = "https://brotecolectivo.com"
 	contentID = 0 // Default ID value
+	viewURL = "https://brotecolectivo.com"
 
 	switch subType {
 	case "band":
 		if id, ok := response["band_id"].(float64); ok {
 			contentID = int(id)
-			contentType = "artista"
-			viewURL = fmt.Sprintf("https://brotecolectivo.com/artist/%s", slug)
+			viewURL = fmt.Sprintf("https://brotecolectivo.com/artista/%s", slug)
 		}
 	case "event", "eventvenue":
 		if id, ok := response["event_id"].(float64); ok {
 			contentID = int(id)
-			contentType = "evento"
-			viewURL = fmt.Sprintf("https://brotecolectivo.com/event/%s", slug)
+			viewURL = fmt.Sprintf("https://brotecolectivo.com/agenda-cultural/%s", slug)
 		}
 	case "news":
 		if id, ok := response["news_id"].(float64); ok {
 			contentID = int(id)
-			contentType = "noticia"
-			viewURL = fmt.Sprintf("https://brotecolectivo.com/news/%s", slug)
+			viewURL = fmt.Sprintf("https://brotecolectivo.com/noticias/%s", slug)
 		}
 	case "video":
 		if id, ok := response["video_id"].(float64); ok {
 			contentID = int(id)
-			contentType = "video"
 			viewURL = fmt.Sprintf("https://brotecolectivo.com/videos")
 		}
 	case "song":
 		if id, ok := response["song_id"].(float64); ok {
 			contentID = int(id)
-			contentType = "canción"
 			viewURL = fmt.Sprintf("https://brotecolectivo.com/artist/%s", slug)
 		}
+	case "artist_link":
+		viewURL = "https://brotecolectivo.com"
 	default:
-		contentType = "contenido"
 		viewURL = "https://brotecolectivo.com"
 	}
 
@@ -152,7 +172,11 @@ func (h *AuthHandler) DirectApprove(w http.ResponseWriter, r *http.Request) {
 
 	// Return a nice HTML page
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	html := fmt.Sprintf(`<!DOCTYPE html>
+	// Agregar encabezados CSP para permitir recursos externos
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' https://brotecolectivo.com")
+
+	// Crear la plantilla HTML con los valores directamente insertados en lugar de usar fmt.Sprintf
+	html := `<!DOCTYPE html>
 <html lang="es">
 <head>
     <meta charset="UTF-8">
@@ -206,6 +230,9 @@ func (h *AuthHandler) DirectApprove(w http.ResponseWriter, r *http.Request) {
         .logo {
             max-width: 180px;
             height: auto;
+            background-color: #333; /* Añadir fondo oscuro para el logo blanco */
+            padding: 10px;
+            border-radius: 8px;
         }
         h1 {
             color: #4CAF50;
@@ -336,25 +363,25 @@ func (h *AuthHandler) DirectApprove(w http.ResponseWriter, r *http.Request) {
         <div class="success-icon"></div>
         <h1>¡Contenido Aprobado!</h1>
         
-        <span class="content-type">%s</span>
-        <div class="content-name">%s</div>
+        <span class="content-type">` + subType + `</span>
+        <div class="content-name">` + name + `</div>
         
         <div class="content-info">
-            <p><strong>ID:</strong> %d</p>
+            <p><strong>ID:</strong> ` + strconv.Itoa(contentID) + `</p>
             <p><strong>Descripción:</strong></p>
-            <div class="description">%s</div>
+            <div class="description">` + description + `</div>
         </div>
         
         <p>El contenido ha sido publicado exitosamente y ya está disponible en el sitio web.</p>
         
-        <a href="%s" class="btn">Ver %s</a>
+        <a href="` + viewURL + `" class="btn">Ver contenido</a>
         
         <div class="footer">
             <p>Administración de <a href="https://brotecolectivo.com">Brote Colectivo</a></p>
         </div>
     </div>
 </body>
-</html>`, contentType, name, contentID, description, viewURL, contentType)
+</html>`
 
 	w.Write([]byte(html))
 }
@@ -368,7 +395,7 @@ func generateApprovalToken(submissionID int, secret string) string {
 type Submission struct {
 	ID        int             `json:"id"`
 	UserID    int             `json:"user_id"`
-	Type      string          `json:"type"` // ejemplo: "banda", "cancion", etc.
+	Type      string          `json:"type"` // ejemplo: "banda", "cancion", "event", "news", "video", "artist_link"
 	Data      json.RawMessage `json:"data"`
 	Status    string          `json:"status"` // pending, aprobado, rechazado
 	Reviewer  *models.User    `json:"reviewer,omitempty"`
@@ -398,15 +425,38 @@ func extractFieldsFromSubmission(sub Submission) (name, description, slug string
 		return data.Title, data.Content, data.Slug, err
 
 	case "eventvenue":
-		var data struct {
-			Event struct {
-				Title   string `json:"title"`
-				Content string `json:"content"`
-				Slug    string `json:"slug"`
-			} `json:"event"`
+		var raw struct {
+			Venue map[string]interface{} `json:"venue"`
+			Event map[string]interface{} `json:"event"`
 		}
-		err = json.Unmarshal(sub.Data, &data)
-		return data.Event.Title, data.Event.Content, data.Event.Slug, err
+		err = json.Unmarshal(sub.Data, &raw)
+		return raw.Event["title"].(string), raw.Event["content"].(string), raw.Event["slug"].(string), err
+
+	case "artist_link":
+		var submissionData struct {
+			Data struct {
+				ArtistID int    `json:"artist_id"`
+				Name     string `json:"name"`
+				Slug     string `json:"slug"`
+				Rol      string `json:"rol"`
+				WhatsApp string `json:"whatsapp"`
+			} `json:"data"`
+		}
+
+		if err = json.Unmarshal(sub.Data, &submissionData); err != nil {
+			// Intentar con la estructura antigua
+			var data struct {
+				ArtistID int    `json:"artist_id"`
+				Name     string `json:"name"`
+				Slug     string `json:"slug"`
+				Rol      string `json:"rol"`
+				WhatsApp string `json:"whatsapp"`
+			}
+			err = json.Unmarshal(sub.Data, &data)
+			return data.Name, "", data.Slug, err
+		}
+
+		return submissionData.Data.Name, "", submissionData.Data.Slug, err
 
 	default:
 		return "Desconocido", "Sin descripción", "unknown", nil
@@ -414,21 +464,79 @@ func extractFieldsFromSubmission(sub Submission) (name, description, slug string
 }
 
 func sendSubmissionWhatsApp(phone string, sub Submission, name, description, slug string, cfg *ini.File) error {
+	// Obtener la URL base para el panel de administración
+	// Generar token de aprobación
+	secret := cfg.Section("security").Key("approval_secret").String()
+	if secret == "" {
+		// Intentar obtener de la sección keys como fallback
+		secret = cfg.Section("keys").Key("approval_secret").String()
+	}
+
+	token := generateApprovalToken(sub.ID, secret)
+
+	// URL para aprobar directamente
+	approveURL := fmt.Sprintf("%d?token=%s", sub.ID, token)
+
+	// Debug de la URL de aprobación
+	fmt.Printf("[WhatsApp Debug] URL de aprobación generada: %s\n", approveURL)
+	fmt.Printf("[WhatsApp Debug] Token generado: %s\n", token)
+	fmt.Printf("[WhatsApp Debug] Secret usado (longitud): %d\n", len(secret))
+
+	// Determinar el tipo de contenido y URL de visualización
+	var viewURL string
+	switch sub.Type {
+	case "band":
+		viewURL = fmt.Sprintf("https://brotecolectivo.com/artista/%s", slug)
+	case "event":
+		viewURL = fmt.Sprintf("https://brotecolectivo.com/agenda-cultural/%s", slug)
+	case "news":
+		viewURL = fmt.Sprintf("https://brotecolectivo.com/noticias/%s", slug)
+	case "song":
+		viewURL = fmt.Sprintf("https://brotecolectivo.com/artist/%s", slug)
+	case "artist_link":
+		viewURL = fmt.Sprintf("https://brotecolectivo.com/artist/%s", slug)
+	default:
+		viewURL = "https://brotecolectivo.com"
+	}
+
 	// Inicio de debug
 	fmt.Println("[WhatsApp Debug] Iniciando envío de WhatsApp")
 	fmt.Printf("[WhatsApp Debug] Parámetros: phone=%s, submissionID=%d, type=%s, name=%s, slug=%s\n",
 		phone, sub.ID, sub.Type, name, slug)
 
-	imageURL := fmt.Sprintf("https://brotecolectivo.sfo3.cdn.digitaloceanspaces.com/pending/%s.jpg", slug)
-	viewURL := fmt.Sprintf("%d", sub.ID)
-	// Generar token con la secret
-	secret := cfg.Section("security").Key("approval_secret").String()
-	token := generateApprovalToken(sub.ID, secret)
-	approveURLWithToken := fmt.Sprintf("%d?token=%s", sub.ID, token)
+	// Debug de configuración
+	whatsappNumber := cfg.Section("keys").Key("whatsapp_number").String()
+	whatsappToken := cfg.Section("keys").Key("whatsapp_token").String()
+	fmt.Printf("[WhatsApp Debug] Configuración: whatsapp_number=%s, token_length=%d\n",
+		whatsappNumber, len(whatsappToken))
 
+	// Asegurarse de que los valores no estén vacíos
+	if name == "" {
+		name = "Sin nombre"
+	}
+	if slug == "" {
+		slug = "sin-slug"
+	}
+	if description == "" {
+		description = "Sin descripción"
+	}
+
+	// Asegurarse de que el tipo no esté vacío
+	submissionType := sub.Type
+	if submissionType == "" {
+		submissionType = "desconocido"
+	}
+
+	// Asegurarse de que el ID de usuario sea una cadena no vacía
+	userIDStr := fmt.Sprintf("%d", sub.UserID)
+	if userIDStr == "0" {
+		userIDStr = "1" // Valor predeterminado para evitar errores
+	}
+
+	imageURL := fmt.Sprintf("https://brotecolectivo.sfo3.cdn.digitaloceanspaces.com/pending/%s.jpg", slug)
 	// Debug de URLs
 	fmt.Printf("[WhatsApp Debug] URLs generadas: imageURL=%s, approveURL=%s\n",
-		imageURL, approveURLWithToken)
+		imageURL, approveURL)
 
 	message := map[string]interface{}{
 		"messaging_product": "whatsapp",
@@ -454,8 +562,8 @@ func sendSubmissionWhatsApp(phone string, sub Submission, name, description, slu
 				{
 					"type": "body",
 					"parameters": []map[string]interface{}{
-						{"type": "text", "text": sub.Type},
-						{"type": "text", "text": fmt.Sprintf("%d", sub.UserID)},
+						{"type": "text", "text": submissionType},
+						{"type": "text", "text": userIDStr},
 						{"type": "text", "text": name},
 						{"type": "text", "text": description},
 					},
@@ -465,7 +573,7 @@ func sendSubmissionWhatsApp(phone string, sub Submission, name, description, slu
 					"sub_type": "url",
 					"index":    0,
 					"parameters": []map[string]interface{}{
-						{"type": "text", "text": approveURLWithToken},
+						{"type": "text", "text": approveURL},
 					},
 				},
 				{
@@ -489,12 +597,6 @@ func sendSubmissionWhatsApp(phone string, sub Submission, name, description, slu
 
 	// Debug del payload JSON
 	fmt.Printf("[WhatsApp Debug] Payload JSON: %s\n", string(jsonData))
-
-	// Debug de configuración
-	whatsappNumber := cfg.Section("keys").Key("whatsapp_number").String()
-	whatsappToken := cfg.Section("keys").Key("whatsapp_token").String()
-	fmt.Printf("[WhatsApp Debug] Configuración: whatsapp_number=%s, token_length=%d\n",
-		whatsappNumber, len(whatsappToken))
 
 	apiURL := fmt.Sprintf("https://graph.facebook.com/v17.0/%s/messages", whatsappNumber)
 	fmt.Printf("[WhatsApp Debug] URL de API: %s\n", apiURL)
@@ -575,9 +677,7 @@ func (h *AuthHandler) GetSubmissions(w http.ResponseWriter, r *http.Request) {
 
 func (h *AuthHandler) GetSubmissionByID(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	row, err := h.DB.SelectRow(`
-		SELECT id, user_id, type, data, status, comment, created_at, updated_at
-		FROM submissions WHERE id = ?`, id)
+	row, err := h.DB.SelectRow("SELECT id, user_id, type, data, status, comment, created_at, updated_at FROM submissions WHERE id = ?", id)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -634,33 +734,91 @@ func moveImageInSpaces(oldKey, newKey string) error {
 }
 
 func (h *AuthHandler) ApproveSubmission(w http.ResponseWriter, r *http.Request) {
+	// Diagnóstico de tabla artist_links
+	h.DB.CheckArtistLinksTable()
+
+	// Extraer ID de la submission
 	id := chi.URLParam(r, "id")
+	if id == "" {
+		http.Error(w, "ID de submission requerido", http.StatusBadRequest)
+		return
+	}
+
+	// Decodificar el cuerpo de la solicitud
 	var payload struct {
 		ReviewerID int `json:"reviewer_id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		http.Error(w, "Error al decodificar datos", http.StatusBadRequest)
-		return
-	}
 
-	row, err := h.DB.SelectRow("SELECT type, data FROM submissions WHERE id = ? AND status = 'pending'", id)
+	err := json.NewDecoder(r.Body).Decode(&payload)
 	if err != nil {
-		http.Error(w, "No se pudo consultar la submission", http.StatusInternalServerError)
+		// Si hay un error al decodificar, usamos un valor predeterminado
+		fmt.Println("Error al decodificar payload:", err)
+		payload.ReviewerID = 1 // Valor predeterminado si no se proporciona
+	}
+
+	// Asegurarnos de que el ID del revisor sea válido
+	if payload.ReviewerID <= 0 {
+		payload.ReviewerID = 1
+	}
+
+	fmt.Println("Aprobando submission ID:", id, "Reviewer ID:", payload.ReviewerID)
+
+	// Obtener datos de la submission
+	row, err := h.DB.SelectRow("SELECT type, data, status FROM submissions WHERE id = ?", id)
+	if err != nil {
+		fmt.Println("Error al obtener submission:", err)
+		http.Error(w, "Error al obtener submission: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	var subType string
-	var dataRaw []byte
-	if err := row.Scan(&subType, &dataRaw); err != nil {
-		http.Error(w, "Submission no encontrada o ya procesada", http.StatusNotFound)
+	var submissionType, status string
+	var dataRaw json.RawMessage
+	if err := row.Scan(&submissionType, &dataRaw, &status); err != nil {
+		fmt.Println("Error al leer datos de submission:", err)
+		http.Error(w, "Error al leer datos de submission: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	switch subType {
+	fmt.Println("Tipo de submission:", submissionType)
+	fmt.Println("Estado actual:", status)
+	fmt.Println("Datos raw:", string(dataRaw))
+
+	// Obtener datos completos de la submission para depuración
+	fmt.Println("Obteniendo datos completos de la submission ID:", id)
+	var submissionUserID int
+	fullSubmissionRow, err := h.DB.SelectRow("SELECT id, type, data, status, user_id, comment FROM submissions WHERE id = ?", id)
+	if err != nil {
+		fmt.Println("Error al obtener datos completos de la submission:", err)
+	} else {
+		var (
+			submissionID      int
+			submissionType    string
+			submissionData    []byte
+			submissionStatus  string
+			submissionComment sql.NullString
+		)
+		if err := fullSubmissionRow.Scan(&submissionID, &submissionType, &submissionData, &submissionStatus, &submissionUserID, &submissionComment); err != nil {
+			fmt.Println("Error al escanear datos completos de la submission:", err)
+		} else {
+			fmt.Println("Datos completos de la submission:")
+			fmt.Println("  ID:", submissionID)
+			fmt.Println("  Tipo:", submissionType)
+			fmt.Println("  Datos:", string(submissionData))
+			fmt.Println("  Estado:", submissionStatus)
+			fmt.Println("  UserID:", submissionUserID)
+			if submissionComment.Valid {
+				fmt.Println("  Comentario:", submissionComment.String)
+			} else {
+				fmt.Println("  Comentario: <sin comentario>")
+			}
+		}
+	}
+
+	switch submissionType {
 	case "band":
 		var band Band
 		if err := json.Unmarshal(dataRaw, &band); err != nil {
-			http.Error(w, "Error al parsear datos", http.StatusInternalServerError)
+			http.Error(w, "Error al parsear datos", http.StatusBadRequest)
 			return
 		}
 		socialJSON, _ := json.Marshal(band.Social)
@@ -674,6 +832,26 @@ func (h *AuthHandler) ApproveSubmission(w http.ResponseWriter, r *http.Request) 
 		_ = moveImageInSpaces("pending/"+band.Slug+".jpg", "bands/"+band.Slug+".jpg")
 		_, _ = h.DB.Update(false, `UPDATE submissions SET status = 'approved', reviewed_by = ? WHERE id = ?`, payload.ReviewerID, id)
 
+		// Crear vinculación automática entre el usuario que envió la banda y la banda creada
+		if submissionUserID > 0 && newID > 0 {
+			fmt.Println("Creando vinculación automática: UserID=", submissionUserID, "BandID=", newID)
+			_, linkErr := h.DB.Insert(false, `INSERT INTO artist_links (user_id, artist_id, rol, status) VALUES (?, ?, ?, 'approved')`,
+				submissionUserID, newID, "creador")
+			if linkErr != nil {
+				fmt.Println("Error al crear vinculación automática:", linkErr)
+				// No interrumpimos el flujo principal, solo registramos el error
+			} else {
+				fmt.Println("Vinculación automática creada correctamente")
+			}
+		}
+
+		// Devolver el ID de la banda creada para que DirectApprove pueda usarlo
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":  "ok",
+			"band_id": newID,
+		})
+
 		// Publicar en redes sociales
 		imagePath := "bands/" + band.Slug + ".jpg"
 		go func() {
@@ -686,8 +864,6 @@ func (h *AuthHandler) ApproveSubmission(w http.ResponseWriter, r *http.Request) 
 			}
 		}()
 
-		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "band_id": newID})
 	case "eventvenue":
 		var raw struct {
 			Venue map[string]interface{} `json:"venue"`
@@ -734,19 +910,9 @@ func (h *AuthHandler) ApproveSubmission(w http.ResponseWriter, r *http.Request) 
 			http.Error(w, "Error al crear evento", http.StatusInternalServerError)
 			return
 		}
-
-		// Asociar band_ids si existen
-		if raw.Event["band_ids"] != nil {
-			if ids, ok := raw.Event["band_ids"].([]interface{}); ok {
-				for _, bid := range ids {
-					if idFloat, ok := bid.(float64); ok {
-						bandID := int(idFloat)
-						_, _ = h.DB.Insert(false, `INSERT INTO events_bands (id_event, id_band) VALUES (?, ?)`, eventID, bandID)
-					}
-				}
-			}
+		for _, band := range event.Bands {
+			_, _ = h.DB.Insert(false, `INSERT INTO events_bands (id_event, id_band) VALUES (?, ?)`, eventID, band.ID)
 		}
-
 		_ = moveImageInSpaces("pending/"+event.Slug+".jpg", "events/"+event.Slug+".jpg")
 		_, _ = h.DB.Update(false, `UPDATE submissions SET status = 'approved', reviewed_by = ? WHERE id = ?`, payload.ReviewerID, id)
 
@@ -771,8 +937,8 @@ func (h *AuthHandler) ApproveSubmission(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		eventID, err := h.DB.Insert(false, `
-	INSERT INTO events (id_venue, title, tags, content, slug, date_start, date_end)
-	VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO events (id_venue, title, tags, content, slug, date_start, date_end)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
 			event.Venue.ID, event.Title, event.Tags, event.Content, event.Slug, event.DateStart, event.DateEnd)
 
 		if err != nil {
@@ -865,6 +1031,264 @@ func (h *AuthHandler) ApproveSubmission(w http.ResponseWriter, r *http.Request) 
 		_, _ = h.DB.Update(false, `UPDATE submissions SET status = 'approved', reviewed_by = ? WHERE id = ?`, payload.ReviewerID, id)
 		json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "video_id": videoID})
 
+	case "artist_link":
+		// Imprimir los datos raw para depuración
+		fmt.Println("Datos raw de artist_link:", string(dataRaw))
+
+		// Definir la estructura para almacenar los datos de la vinculación
+		var link struct {
+			ArtistID int
+			UserID   int
+			Name     string
+			Slug     string
+			Rol      string
+		}
+
+		// Primero, intentar extraer directamente usando una estructura definida
+		var submissionData struct {
+			Data struct {
+				ArtistID int    `json:"artist_id"`
+				Name     string `json:"name"`
+				Slug     string `json:"slug"`
+				Rol      string `json:"rol"`
+			} `json:"data"`
+		}
+
+		// También probar con una estructura alternativa donde los datos están en el nivel superior
+		var directData struct {
+			ArtistID int    `json:"artist_id"`
+			Name     string `json:"name"`
+			Slug     string `json:"slug"`
+			Rol      string `json:"rol"`
+		}
+
+		// Intentar primero con la estructura anidada
+		if err := json.Unmarshal(dataRaw, &submissionData); err == nil && submissionData.Data.ArtistID > 0 {
+			link.ArtistID = submissionData.Data.ArtistID
+			link.Name = submissionData.Data.Name
+			link.Slug = submissionData.Data.Slug
+			link.Rol = submissionData.Data.Rol
+			fmt.Println("Datos extraídos de estructura anidada: ArtistID=", link.ArtistID)
+		} else if err := json.Unmarshal(dataRaw, &directData); err == nil && directData.ArtistID > 0 {
+			// Si falla, intentar con la estructura directa
+			link.ArtistID = directData.ArtistID
+			link.Name = directData.Name
+			link.Slug = directData.Slug
+			link.Rol = directData.Rol
+			fmt.Println("Datos extraídos de estructura directa: ArtistID=", link.ArtistID)
+		} else {
+			fmt.Println("No se pudieron extraer datos de las estructuras JSON:", err)
+		}
+
+		// Si los IDs siguen siendo inválidos, intentar obtenerlos directamente de la base de datos
+		if link.UserID <= 0 || link.ArtistID <= 0 {
+			// Obtener los datos completos de la submission
+			var submissionRaw []byte
+			rawDataRow, _ := h.DB.SelectRow("SELECT data FROM submissions WHERE id = ?", id)
+			if rawDataRow != nil && rawDataRow.Scan(&submissionRaw) == nil {
+				// Intentar extraer directamente el artist_id
+				var rawData map[string]interface{}
+				if json.Unmarshal(submissionRaw, &rawData) == nil {
+					if dataObj, ok := rawData["data"].(map[string]interface{}); ok {
+						if artistID, ok := dataObj["artist_id"]; ok {
+							switch v := artistID.(type) {
+							case float64:
+								link.ArtistID = int(v)
+							case int:
+								link.ArtistID = v
+							case string:
+								if id, err := strconv.Atoi(v); err == nil {
+									link.ArtistID = id
+								}
+							}
+						}
+					}
+				}
+
+				// Obtener el user_id directamente
+				var userID int
+				userIDRow, _ := h.DB.SelectRow("SELECT user_id FROM submissions WHERE id = ?", id)
+				if userIDRow != nil && userIDRow.Scan(&userID) == nil && userID > 0 {
+					link.UserID = userID
+				}
+			}
+
+			fmt.Println("Datos finales para la vinculación:", link)
+		}
+
+		// Verificar que los IDs sean válidos
+		if link.UserID <= 0 || link.ArtistID <= 0 {
+			errMsg := fmt.Sprintf("IDs inválidos: UserID=%d, ArtistID=%d", link.UserID, link.ArtistID)
+			fmt.Println(errMsg)
+			http.Error(w, errMsg, http.StatusBadRequest)
+			return
+		}
+
+		// Verificar si ya existe una vinculación
+		var exists bool
+		existsRow, _ := h.DB.SelectRow("SELECT EXISTS(SELECT 1 FROM artist_links WHERE user_id = ? AND artist_id = ?)",
+			link.UserID, link.ArtistID)
+		if err := existsRow.Scan(&exists); err == nil && exists {
+			fmt.Println("Ya existe una vinculación para este usuario y artista")
+			// Actualizar en lugar de insertar
+			_, err = h.DB.Update(false, `UPDATE artist_links SET rol = ?, status = 'approved' WHERE user_id = ? AND artist_id = ?`,
+				link.Rol, link.UserID, link.ArtistID)
+		} else {
+			// Insertar nueva vinculación
+			_, err = h.DB.Insert(false, `INSERT INTO artist_links (user_id, artist_id, rol, status) VALUES (?, ?, ?, 'approved')`,
+				link.UserID, link.ArtistID, link.Rol)
+			fmt.Printf("Creando nueva vinculación de artista: UserID=%d, ArtistID=%d, Rol=%s\n",
+				link.UserID, link.ArtistID, link.Rol)
+		}
+
+		if err != nil {
+			fmt.Println("Error al crear/actualizar vínculo de artista:", err)
+			http.Error(w, "Error al crear vínculo de artista: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		// Actualizar estado de la submission
+		updateResult, err := h.DB.Update(false, `UPDATE submissions SET status = 'approved', reviewed_by = ? WHERE id = ?`,
+			payload.ReviewerID, id)
+		if err != nil {
+			fmt.Println("Error al actualizar estado de submission:", err)
+		} else {
+			fmt.Println("Submission actualizada correctamente, filas afectadas:", updateResult)
+		}
+
+		// Enviar notificación por WhatsApp si hay un número guardado
+		comment, _ := h.DB.SelectRow("SELECT comment FROM submissions WHERE id = ?", id)
+		var commentStr string
+		if err := comment.Scan(&commentStr); err != nil {
+			fmt.Println("Error al obtener comentario:", err)
+			// No interrumpimos el flujo, solo registramos el error
+		}
+
+		if strings.Contains(commentStr, "WhatsApp:") {
+			// Extraer número de WhatsApp
+			whatsappParts := strings.Split(commentStr, "WhatsApp:")
+			if len(whatsappParts) > 1 {
+				userPhone := strings.TrimSpace(whatsappParts[1])
+				if userPhone != "" {
+					// Cargar configuración
+					cfg, err := ini.Load("data.conf")
+					if err == nil {
+						// Preparar datos para el mensaje
+						fmt.Println("Preparando mensaje de WhatsApp para:", userPhone)
+						fmt.Println("Datos de la vinculación - Rol:", link.Rol, "Nombre:", link.Name)
+
+						// Asegurar que los valores no estén vacíos
+						rol := link.Rol
+						if rol == "" {
+							rol = "colaborador"
+						}
+
+						artistName := link.Name
+						if artistName == "" {
+							artistName = "el artista"
+						}
+
+						// Verificar formato del número de teléfono
+						if !strings.HasPrefix(userPhone, "+") && !strings.HasPrefix(userPhone, "549") {
+							// Agregar prefijo de Argentina si no lo tiene
+							userPhone = "549" + userPhone
+						}
+
+						// Eliminar cualquier espacio o carácter no numérico (excepto el +)
+						userPhone = strings.Map(func(r rune) rune {
+							if r == '+' || (r >= '0' && r <= '9') {
+								return r
+							}
+							return -1
+						}, userPhone)
+
+						fmt.Println("Número de teléfono formateado:", userPhone)
+
+						// Construir el mensaje según la plantilla vinculacion_aprobada
+						message := map[string]interface{}{
+							"messaging_product": "whatsapp",
+							"recipient_type":    "individual",
+							"to":                userPhone,
+							"type":              "template",
+							"template": map[string]interface{}{
+								"name": "vinculacion_aprobada",
+								"language": map[string]interface{}{
+									"code": "es",
+								},
+								"components": []map[string]interface{}{
+									{
+										"type": "body",
+										"parameters": []map[string]interface{}{
+											{"type": "text", "text": rol},
+											{"type": "text", "text": artistName},
+										},
+									},
+								},
+							},
+						}
+
+						// Enviar mensaje
+						whatsappToken := cfg.Section("keys").Key("whatsapp_token").String()
+						whatsappPhoneID := cfg.Section("keys").Key("whatsapp_number").String()
+
+						if whatsappToken != "" && whatsappPhoneID != "" {
+							go func() {
+								jsonData, _ := json.Marshal(message)
+								fmt.Println("Enviando WhatsApp a:", userPhone)
+								fmt.Println("Datos del mensaje:", string(jsonData))
+
+								req, _ := http.NewRequest("POST", fmt.Sprintf("https://graph.facebook.com/v17.0/%s/messages", whatsappPhoneID), bytes.NewBuffer(jsonData))
+								req.Header.Set("Content-Type", "application/json")
+								req.Header.Set("Authorization", "Bearer "+whatsappToken)
+
+								client := &http.Client{
+									Timeout: 30 * time.Second, // Agregar timeout para evitar bloqueos indefinidos
+								}
+								resp, err := client.Do(req)
+								if err != nil {
+									fmt.Println("Error al enviar WhatsApp:", err)
+									return
+								}
+
+								// Leer y mostrar la respuesta
+								defer resp.Body.Close()
+								respBody, _ := io.ReadAll(resp.Body)
+								fmt.Println("Respuesta de WhatsApp API:", resp.Status)
+								fmt.Println(string(respBody))
+
+								// Si hay un error, intentar interpretar la respuesta
+								if resp.StatusCode >= 400 {
+									var errorResp map[string]interface{}
+									if err := json.Unmarshal(respBody, &errorResp); err == nil {
+										if errObj, ok := errorResp["error"].(map[string]interface{}); ok {
+											fmt.Println("Código de error:", errObj["code"])
+											fmt.Println("Mensaje de error:", errObj["message"])
+											if errData, ok := errObj["error_data"].(map[string]interface{}); ok {
+												fmt.Println("Detalles del error:", errData["details"])
+											}
+										}
+									}
+								}
+							}()
+						} else {
+							fmt.Println("No se pudo enviar WhatsApp: falta token o phone_id")
+							fmt.Println("Phone ID:", whatsappPhoneID)
+							fmt.Println("Token disponible:", whatsappToken != "")
+						}
+					} else {
+						fmt.Println("Error al cargar configuración para WhatsApp:", err)
+					}
+				} else {
+					fmt.Println("Número de WhatsApp vacío")
+				}
+			} else {
+				fmt.Println("Formato incorrecto para WhatsApp en el comentario")
+			}
+		} else {
+			fmt.Println("No se encontró número de WhatsApp en el comentario")
+		}
+
+		json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 	default:
 		http.Error(w, "Tipo de submission no soportado", http.StatusBadRequest)
 	}
@@ -974,31 +1398,38 @@ func (h *AuthHandler) CreateSubmission(w http.ResponseWriter, r *http.Request) {
 			// número del admin al que querés mandar el mensaje
 			adminPhone := cfg.Section("keys").Key("admin_phone").String()
 			if adminPhone != "" {
-				fmt.Printf("[WhatsApp Debug] Iniciando envío asíncrono a %s para submission ID %d\n", adminPhone, s.ID)
-				go func() {
-					err := sendSubmissionWhatsApp(adminPhone, s, name, description, slug, cfg)
-					if err != nil {
-						fmt.Printf("[WhatsApp Debug] Error en envío asíncrono: %v\n", err)
-					}
-				}()
-			} else {
-				fmt.Println("[WhatsApp Debug] No se encontró número de admin en configuración")
+				sendSubmissionWhatsApp(adminPhone, s, name, description, slug, cfg)
 			}
-		} else {
-			fmt.Printf("[WhatsApp Debug] Error al extraer campos: %v\n", err)
+
+			// Si es una solicitud de vinculación y se proporcionó un número de WhatsApp, guardarlo
+			if s.Type == "artist_link" {
+				var linkData struct {
+					WhatsApp string `json:"whatsapp"`
+				}
+				if err := json.Unmarshal(s.Data, &linkData); err == nil && linkData.WhatsApp != "" {
+					// Guardar el número de WhatsApp en la base de datos para notificaciones futuras
+					_, _ = h.DB.Update(false, `
+						UPDATE submissions 
+						SET comment = ? 
+						WHERE id = ?`,
+						fmt.Sprintf("WhatsApp: %s", linkData.WhatsApp), s.ID)
+				}
+			}
 		}
-	} else {
-		fmt.Printf("[WhatsApp Debug] Error al cargar configuración: %v\n", err)
 	}
+
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(s)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status": "ok",
+		"id":     s.ID,
+	})
 }
 
 func (h *AuthHandler) UpdateSubmissionStatus(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	var payload struct {
 		Status     string          `json:"status"`
-		Comment    string          `json:"comment"`
+		Comment    sql.NullString  `json:"comment"` // Cambiado a sql.NullString para manejar NULL
 		ReviewerID int             `json:"reviewer_id"`
 		Data       json.RawMessage `json:"data"`
 	}
@@ -1006,12 +1437,235 @@ func (h *AuthHandler) UpdateSubmissionStatus(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "Error al decodificar", http.StatusBadRequest)
 		return
 	}
+
+	// Verificar que el estado sea válido
+	validStatus := map[string]bool{
+		"pending":  true,
+		"approved": true,
+		"rejected": true,
+	}
+	if !validStatus[payload.Status] {
+		http.Error(w, "Estado no válido", http.StatusBadRequest)
+		return
+	}
+
+	// Procesar el comentario para asegurarnos que sea un NullString válido
+	if payload.Comment.String == "" {
+		payload.Comment.Valid = false
+	} else {
+		payload.Comment.Valid = true
+	}
+
+	// Si el estado es "approved", crear un vínculo de artista
+	if payload.Status == "approved" {
+		// Obtener datos de la submission
+		row, err := h.DB.SelectRow("SELECT type, data, user_id FROM submissions WHERE id = ?", id)
+		if err != nil {
+			http.Error(w, "Error al obtener submission", http.StatusInternalServerError)
+			return
+		}
+
+		var submissionType string
+		var dataRaw json.RawMessage
+		var userID int
+		if err := row.Scan(&submissionType, &dataRaw, &userID); err != nil {
+			http.Error(w, "Error al leer datos de submission", http.StatusInternalServerError)
+			return
+		}
+
+		fmt.Println("Procesando aprobación de submission tipo:", submissionType, "UserID:", userID)
+		fmt.Println("Datos raw:", string(dataRaw))
+
+		// Verificar si es una solicitud de vinculación
+		if submissionType == "artist_link" {
+			// Extraer datos de la solicitud de vinculación
+			var link struct {
+				ArtistID int
+				UserID   int
+				Name     string
+				Slug     string
+				Rol      string
+			}
+
+			// Asignar el user_id que ya obtuvimos de la base de datos
+			link.UserID = userID
+
+			// Intentar extraer datos de la estructura JSON
+			var submissionData struct {
+				Data struct {
+					ArtistID int    `json:"artist_id"`
+					Name     string `json:"name"`
+					Slug     string `json:"slug"`
+					Rol      string `json:"rol"`
+				} `json:"data"`
+			}
+
+			if err := json.Unmarshal(dataRaw, &submissionData); err == nil {
+				link.ArtistID = submissionData.Data.ArtistID
+				link.Name = submissionData.Data.Name
+				link.Slug = submissionData.Data.Slug
+				link.Rol = submissionData.Data.Rol
+			}
+
+			// Verificar que los IDs sean válidos
+			if link.UserID <= 0 || link.ArtistID <= 0 {
+				http.Error(w, "IDs inválidos para vinculación de artista", http.StatusBadRequest)
+				return
+			}
+
+			// Verificar si ya existe una vinculación
+			var exists bool
+			existsRow, _ := h.DB.SelectRow("SELECT EXISTS(SELECT 1 FROM artist_links WHERE user_id = ? AND artist_id = ?)",
+				link.UserID, link.ArtistID)
+			if err := existsRow.Scan(&exists); err == nil && exists {
+				// Actualizar en lugar de insertar
+				_, err = h.DB.Update(false, `UPDATE artist_links SET rol = ?, status = 'approved' WHERE user_id = ? AND artist_id = ?`,
+					link.Rol, link.UserID, link.ArtistID)
+			} else {
+				// Insertar nueva vinculación
+				_, err = h.DB.Insert(false, `INSERT INTO artist_links (user_id, artist_id, rol, status) VALUES (?, ?, ?, 'approved')`,
+					link.UserID, link.ArtistID, link.Rol)
+			}
+
+			if err != nil {
+				http.Error(w, "Error al crear vínculo de artista", http.StatusInternalServerError)
+				return
+			}
+		}
+	}
+
+	// Actualizar la submission en la base de datos
 	_, err := h.DB.Update(false, `
 		UPDATE submissions SET status=?, comment=?, reviewed_by=?, data=? WHERE id=?`,
 		payload.Status, payload.Comment, payload.ReviewerID, payload.Data, id)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		fmt.Println("Error al actualizar submission:", err)
+		http.Error(w, "Error al actualizar submission: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	// Enviar notificación de WhatsApp si es necesario
+	if payload.Status == "approved" || payload.Status == "rejected" {
+		// Obtener datos de la submission
+		var (
+			userID       int
+			submissionID int
+			whatsapp     string
+			comment      sql.NullString // Cambiado a sql.NullString para manejar NULL
+		)
+
+		// Obtener el número de WhatsApp del usuario
+		row, err := h.DB.SelectRow(`
+			SELECT s.id, s.user_id, u.whatsapp, s.comment
+			FROM submissions s
+			JOIN users u ON s.user_id = u.id
+			WHERE s.id = ?
+		`, id)
+
+		if err == nil && row != nil {
+			if err := row.Scan(&submissionID, &userID, &whatsapp, &comment); err == nil && whatsapp != "" {
+				// Preparar mensaje según el estado
+				var message string
+				if payload.Status == "approved" {
+					message = fmt.Sprintf("¡Buenas noticias! Tu solicitud en Brote Colectivo ha sido aprobada.")
+				} else {
+					message = fmt.Sprintf("Tu solicitud en Brote Colectivo ha sido rechazada.")
+				}
+
+				// Agregar comentario si existe
+				if comment.Valid && comment.String != "" {
+					message += fmt.Sprintf("\n\nComentario: %s", comment.String)
+				}
+
+				// Enviar mensaje de WhatsApp
+				go h.sendWhatsAppMessage(whatsapp, message)
+			} else if err != nil {
+				fmt.Println("Error al escanear datos para WhatsApp:", err)
+			}
+		} else if err != nil {
+			fmt.Println("Error al obtener datos para WhatsApp:", err)
+		}
+	}
+
 	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+}
+
+// sendWhatsAppMessage envía un mensaje simple de WhatsApp al número especificado
+func (h *AuthHandler) sendWhatsAppMessage(phone, message string) error {
+	// Cargar configuración
+	cfg, err := ini.Load("data.conf")
+	if err != nil {
+		fmt.Println("Error al cargar configuración para WhatsApp:", err)
+		return err
+	}
+
+	// Obtener credenciales de WhatsApp
+	whatsappNumber := cfg.Section("keys").Key("whatsapp_number").String()
+	whatsappToken := cfg.Section("keys").Key("whatsapp_token").String()
+
+	// Verificar que tengamos las credenciales necesarias
+	if whatsappNumber == "" || whatsappToken == "" {
+		errMsg := "Faltan credenciales de WhatsApp en la configuración"
+		fmt.Println(errMsg)
+		return fmt.Errorf(errMsg)
+	}
+
+	// Preparar el payload para el mensaje de texto simple
+	payload := map[string]interface{}{
+		"messaging_product": "whatsapp",
+		"to":                phone,
+		"type":              "text",
+		"text": map[string]string{
+			"body": message,
+		},
+	}
+
+	// Convertir a JSON
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		errMsg := fmt.Sprintf("Error al convertir mensaje a JSON: %v", err)
+		fmt.Println(errMsg)
+		return fmt.Errorf(errMsg)
+	}
+
+	// Preparar la solicitud HTTP
+	apiURL := fmt.Sprintf("https://graph.facebook.com/v17.0/%s/messages", whatsappNumber)
+	req, err := http.NewRequest("POST", apiURL, bytes.NewBuffer(jsonData))
+	if err != nil {
+		errMsg := fmt.Sprintf("Error al crear request HTTP: %v", err)
+		fmt.Println(errMsg)
+		return fmt.Errorf(errMsg)
+	}
+
+	// Configurar headers
+	req.Header.Set("Authorization", "Bearer "+whatsappToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	// Enviar la solicitud
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+	}
+
+	fmt.Println("Enviando mensaje de WhatsApp a:", phone)
+	resp, err := client.Do(req)
+	if err != nil {
+		errMsg := fmt.Sprintf("Error al enviar mensaje de WhatsApp: %v", err)
+		fmt.Println(errMsg)
+		return fmt.Errorf(errMsg)
+	}
+	defer resp.Body.Close()
+
+	// Leer y mostrar la respuesta
+	body, _ := io.ReadAll(resp.Body)
+	fmt.Printf("Respuesta de API WhatsApp (status=%d): %s\n", resp.StatusCode, string(body))
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		errMsg := fmt.Sprintf("Error en API de WhatsApp: %s", string(body))
+		fmt.Println(errMsg)
+		return fmt.Errorf(errMsg)
+	}
+
+	fmt.Println("Mensaje de WhatsApp enviado exitosamente")
+	return nil
 }

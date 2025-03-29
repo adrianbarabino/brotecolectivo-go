@@ -3,6 +3,7 @@ package main
 import (
 	"brotecolectivo/database"
 	"brotecolectivo/handlers"
+	"brotecolectivo/utils"
 	"flag"
 	"fmt"
 	"log"
@@ -48,15 +49,20 @@ func initConfig() {
 	// Leer las propiedades de la sección "database"
 	dataSection := cfg.Section("keys")
 	jwtKey = []byte(dataSection.Key("JWT_KEY").String())
-	dbSection := cfg.Section("database")
-	username := dbSection.Key("DB_USER").String()
-	password := dbSection.Key("DB_PASS").String()
-	host := dbSection.Key("DB_HOST").String()
-	databaseName := dbSection.Key("DB_NAME").String()
 
-	// Inicializar la base de datos
-	dataBase, err = database.NewDatabase(username, password, databaseName, host)
+	// Sincronizar la clave JWT con el paquete utils
+	utils.SetJwtKey(jwtKey)
+
+	dbSection := cfg.Section("database")
+
+	// Inicializar la conexión a la base de datos
+	dataBase, err = database.NewDatabase(
+		dbSection.Key("DB_USER").String(),
+		dbSection.Key("DB_PASS").String(),
+		dbSection.Key("DB_NAME").String(),
+		dbSection.Key("DB_HOST").String(),
+	)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal("Error al conectar con la base de datos: ", err)
 	}
 }

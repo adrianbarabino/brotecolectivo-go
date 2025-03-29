@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 
+	"brotecolectivo/models"
+
 	"github.com/go-chi/chi/v5"
 	"gopkg.in/ini.v1"
 )
@@ -400,6 +402,9 @@ func (h *AuthHandler) GetBands(w http.ResponseWriter, r *http.Request) {
 // @Failure 500 {string} string "Error al consultar la banda"
 // @Router /bands/{id} [get]
 func (h *AuthHandler) GetBandByID(w http.ResponseWriter, r *http.Request) {
+	// Configurar encabezados para JSON
+	w.Header().Set("Content-Type", "application/json")
+
 	id := chi.URLParam(r, "id")
 	var b Band
 	var socialRaw []byte
@@ -409,32 +414,53 @@ func (h *AuthHandler) GetBandByID(w http.ResponseWriter, r *http.Request) {
 		// es un slug, buscamos por slug
 		row, err := h.DB.SelectRow("SELECT id, name, bio, slug, social FROM bands WHERE slug = ?", id)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Error al consultar la base de datos: " + err.Error()})
 			return
 		}
 		err = row.Scan(&b.ID, &b.Name, &b.Bio, &b.Slug, &socialRaw)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusNotFound)
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Artista no encontrado con slug: " + id})
 			return
 		}
 	} else {
-
 		row, err := h.DB.SelectRow("SELECT id, name, bio, slug, social FROM bands WHERE id = ?", id)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Error al consultar la base de datos: " + err.Error()})
 			return
 		}
 
 		err = row.Scan(&b.ID, &b.Name, &b.Bio, &b.Slug, &socialRaw)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusNotFound)
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Artista no encontrado con ID: " + id})
 			return
 		}
 	}
 
-	if err := json.Unmarshal(socialRaw, &b.Social); err != nil {
-		b.Social = map[string]string{}
+	// Inicializar Social como un mapa vacío si es nil
+	b.Social = map[string]string{}
+
+	if socialRaw != nil && len(socialRaw) > 0 {
+		if err := json.Unmarshal(socialRaw, &b.Social); err != nil {
+			// Si hay error al deserializar, mantenemos el mapa vacío
+			fmt.Printf("Error al deserializar social para banda %d: %v\n", b.ID, err)
+		}
 	}
+
+	// Asegurarnos de que todos los campos estén inicializados
+	if b.Name == "" {
+		b.Name = "Sin nombre"
+	}
+	if b.Bio == "" {
+		b.Bio = ""
+	}
+	if b.Slug == "" {
+		b.Slug = fmt.Sprintf("band-%d", b.ID)
+	}
+
 	json.NewEncoder(w).Encode(b)
 }
 
@@ -480,11 +506,15 @@ func (h *AuthHandler) CreateBand(w http.ResponseWriter, r *http.Request) {
 // @Security BearerAuth
 // @Router /bands/{id} [put]
 func (h *AuthHandler) UpdateBand(w http.ResponseWriter, r *http.Request) {
+	// Configurar encabezados para JSON
+	w.Header().Set("Content-Type", "application/json")
+
 	var b Band
 	id := chi.URLParam(r, "id")
 
 	if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
-		http.Error(w, "Error al decodificar el cuerpo", http.StatusBadRequest)
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Error al decodificar el cuerpo: " + err.Error()})
 		return
 	}
 
@@ -492,11 +522,42 @@ func (h *AuthHandler) UpdateBand(w http.ResponseWriter, r *http.Request) {
 
 	_, err := h.DB.Update(false, "UPDATE bands SET name=?, bio=?, slug=?, social=? WHERE id=?", b.Name, b.Bio, b.Slug, string(socialJSON), id)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Error al actualizar el artista: " + err.Error()})
 		return
 	}
 
+	// Obtener los datos actualizados para devolverlos en la respuesta
+	var updatedBand Band
+	var socialRaw []byte
+
+	row, err := h.DB.SelectRow("SELECT id, name, bio, slug, social FROM bands WHERE id = ?", id)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Artista actualizado pero no se pudo recuperar la información actualizada"})
+		return
+	}
+
+	err = row.Scan(&updatedBand.ID, &updatedBand.Name, &updatedBand.Bio, &updatedBand.Slug, &socialRaw)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Artista actualizado pero no se pudo recuperar la información actualizada"})
+		return
+	}
+
+	// Inicializar Social como un mapa vacío si es nil
+	updatedBand.Social = map[string]string{}
+
+	if socialRaw != nil && len(socialRaw) > 0 {
+		if err := json.Unmarshal(socialRaw, &updatedBand.Social); err != nil {
+			// Si hay error al deserializar, mantenemos el mapa vacío
+			fmt.Printf("Error al deserializar social para banda %d: %v\n", updatedBand.ID, err)
+		}
+	}
+
+	// Devolver los datos actualizados
 	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(updatedBand)
 }
 
 // DeleteBand elimina una banda/artista de la base de datos.
@@ -521,4 +582,144 @@ func (h *AuthHandler) DeleteBand(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// GetUserBands obtiene los artistas vinculados a un usuario específico.
+//
+// @Summary Obtener artistas de un usuario
+// @Description Obtiene los artistas vinculados a un usuario específico
+// @Tags bands
+// @Accept json
+// @Produce json
+// @Param user_id path int true "ID del usuario"
+// @Success 200 {array} Band "Lista de artistas vinculados al usuario"
+// @Failure 400 {string} string "ID inválido"
+// @Failure 500 {string} string "Error al obtener los artistas"
+// @Security BearerAuth
+// @Router /bands/user/{user_id} [get]
+func (h *AuthHandler) GetUserBands(w http.ResponseWriter, r *http.Request) {
+	// Configurar encabezados para JSON
+	w.Header().Set("Content-Type", "application/json")
+
+	userID := chi.URLParam(r, "user_id")
+
+	// Verificar que el usuario autenticado tenga permiso para ver estos artistas
+	claims, ok := r.Context().Value("user").(*models.Claims)
+	if !ok {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Usuario no autenticado"})
+		return
+	}
+
+	// Convertir userID de string a uint para comparar con claims.UserID
+	userIDUint, err := strconv.ParseUint(userID, 10, 32)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "ID de usuario inválido"})
+		return
+	}
+
+	// Solo permitir acceso si es el mismo usuario o es admin
+	if claims.UserID != uint(userIDUint) && claims.Role != "admin" {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]string{"error": "No tienes permiso para ver estos artistas"})
+		return
+	}
+
+	// Consultar los artistas vinculados al usuario
+	rows, err := h.DB.Select(`
+		SELECT b.id, b.name, b.bio, b.slug, b.social, al.rol
+		FROM bands b
+		JOIN artist_links al ON b.id = al.artist_id
+		WHERE al.user_id = ? AND al.status = 'approved'
+		ORDER BY b.name ASC`, userID)
+
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Error al consultar los artistas: " + err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	bands := []Band{}
+
+	for rows.Next() {
+		var band Band
+		var socialRaw []byte
+		var rol string
+
+		if err := rows.Scan(&band.ID, &band.Name, &band.Bio, &band.Slug, &socialRaw, &rol); err != nil {
+			continue // Saltamos este registro si hay error
+		}
+
+		// Inicializar Social como un mapa vacío si es nil
+		band.Social = map[string]string{}
+
+		if socialRaw != nil && len(socialRaw) > 0 {
+			if err := json.Unmarshal(socialRaw, &band.Social); err != nil {
+				// Si hay error al deserializar, mantenemos el mapa vacío
+				fmt.Printf("Error al deserializar social para banda %d: %v\n", band.ID, err)
+			}
+		}
+
+		// Agregar el rol a los datos sociales para mostrarlo en el frontend
+		band.Social["rol"] = rol
+
+		bands = append(bands, band)
+	}
+
+	json.NewEncoder(w).Encode(bands)
+}
+
+// SearchBands busca artistas por nombre
+func (h *AuthHandler) SearchBands(w http.ResponseWriter, r *http.Request) {
+	// Establecer encabezados CORS
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+	// Manejar solicitudes OPTIONS
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	// Obtener el término de búsqueda
+	query := r.URL.Query().Get("q")
+	if query == "" {
+		http.Error(w, "Parámetro de búsqueda 'q' requerido", http.StatusBadRequest)
+		return
+	}
+
+	// Buscar artistas que coincidan con el nombre
+	rows, err := h.DB.Select(
+		`SELECT id, name, slug FROM bands 
+		WHERE name LIKE ? 
+		ORDER BY name ASC LIMIT 10`,
+		"%"+query+"%",
+	)
+	if err != nil {
+		http.Error(w, "Error al buscar artistas: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	// Construir la respuesta
+	var bands []map[string]interface{}
+	for rows.Next() {
+		var id int
+		var name, slug string
+		if err := rows.Scan(&id, &name, &slug); err != nil {
+			continue
+		}
+		bands = append(bands, map[string]interface{}{
+			"id":   id,
+			"name": name,
+			"slug": slug,
+		})
+	}
+
+	// Devolver los resultados como JSON
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(bands)
 }

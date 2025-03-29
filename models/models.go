@@ -243,6 +243,7 @@ type SettingVal struct {
 
 // Estructura para almacenar las reclamaciones (claims) del token JWT
 type Claims struct {
-	UserID uint `json:"user_id"`
+	UserID uint   `json:"user_id"`
+	Role   string `json:"role"`
 	jwt.StandardClaims
 }
