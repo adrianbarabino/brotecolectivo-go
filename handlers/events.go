@@ -13,6 +13,10 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
+// Event representa un evento cultural en la plataforma Brote Colectivo.
+// Contiene información sobre fechas, ubicación, artistas participantes y detalles del evento.
+//
+// @Schema
 type Event struct {
 	ID        int    `json:"id"`
 	Title     string `json:"title"`
@@ -24,42 +28,17 @@ type Event struct {
 	Venue     *Venue `json:"venue"`
 	Bands     []Band `json:"bands"`
 	VenueID   int    `json:"id_venue"` // <--- agregar esto
-
 }
 
-func (h *AuthHandler) UploadEventImage(w http.ResponseWriter, r *http.Request) {
-	r.ParseMultipartForm(10 << 20)
-	file, handler, err := r.FormFile("file")
-	if err != nil {
-		http.Error(w, "No se pudo leer el archivo", http.StatusBadRequest)
-		return
-	}
-	defer file.Close()
-
-	slug := r.FormValue("slug")
-	if slug == "" {
-		http.Error(w, "Slug faltante", http.StatusBadRequest)
-		return
-	}
-
-	tempFile, err := os.CreateTemp("", "upload-*.jpg")
-	if err != nil {
-		http.Error(w, "No se pudo crear archivo temporal", http.StatusInternalServerError)
-		return
-	}
-	defer os.Remove(tempFile.Name())
-	io.Copy(tempFile, file)
-
-	err = uploadToSpaces(tempFile.Name(), "events/"+slug+".jpg", handler.Header.Get("Content-Type"))
-	if err != nil {
-		http.Error(w, "Error al subir imagen: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(map[string]string{"message": "Imagen subida con éxito"})
-}
-
+// GetEventsCount devuelve el número total de eventos en la base de datos.
+//
+// @Summary Obtener conteo de eventos
+// @Description Devuelve el número total de eventos registrados en la plataforma
+// @Tags eventos
+// @Produce json
+// @Success 200 {object} map[string]int "Conteo exitoso"
+// @Failure 500 {string} string "Error interno del servidor"
+// @Router /events/count [get]
 func (h *AuthHandler) GetEventsCount(w http.ResponseWriter, r *http.Request) {
 	search := r.URL.Query().Get("q")
 	idFilter := r.URL.Query().Get("id")
@@ -108,6 +87,21 @@ func (h *AuthHandler) GetEventsCount(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]int{"count": count})
 }
 
+// GetEventsDatatable devuelve los datos de eventos en formato para DataTables.
+//
+// @Summary Obtener eventos para DataTables
+// @Description Devuelve los datos de eventos formateados para su uso con DataTables
+// @Tags eventos
+// @Produce json
+// @Param draw query int false "Parámetro draw de DataTables"
+// @Param start query int false "Índice de inicio para paginación"
+// @Param length query int false "Número de registros a mostrar"
+// @Param search[value] query string false "Término de búsqueda"
+// @Param order[0][column] query int false "Índice de la columna para ordenar"
+// @Param order[0][dir] query string false "Dirección de ordenamiento (asc/desc)"
+// @Success 200 {object} DatatableResponse "Datos para DataTables"
+// @Failure 500 {string} string "Error interno del servidor"
+// @Router /events/table [get]
 func (h *AuthHandler) GetEventsDatatable(w http.ResponseWriter, r *http.Request) {
 	offsetParam := r.URL.Query().Get("offset")
 	limitParam := r.URL.Query().Get("limit")
@@ -225,6 +219,20 @@ func (h *AuthHandler) GetEventsDatatable(w http.ResponseWriter, r *http.Request)
 	json.NewEncoder(w).Encode(events)
 }
 
+// GetEvents devuelve todos los eventos, con opciones de filtrado y paginación.
+//
+// @Summary Listar eventos
+// @Description Obtiene una lista de eventos con opciones de filtrado y paginación
+// @Tags eventos
+// @Produce json
+// @Param page query int false "Número de página para paginación"
+// @Param limit query int false "Límite de registros por página"
+// @Param search query string false "Término de búsqueda"
+// @Param upcoming query bool false "Solo eventos futuros"
+// @Param past query bool false "Solo eventos pasados"
+// @Success 200 {array} Event "Lista de eventos"
+// @Failure 500 {string} string "Error interno del servidor"
+// @Router /events [get]
 func (h *AuthHandler) GetEvents(w http.ResponseWriter, r *http.Request) {
 	offsetParam := r.URL.Query().Get("offset")
 	limitParam := r.URL.Query().Get("limit")
@@ -304,7 +312,7 @@ func (h *AuthHandler) GetEvents(w http.ResponseWriter, r *http.Request) {
 					bands = append(bands, b)
 				}
 			}
-			bandRows.Close() // ✅ cerrar por cada evento
+			bandRows.Close() // 
 			e.Bands = bands
 		}
 
@@ -315,6 +323,18 @@ func (h *AuthHandler) GetEvents(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(events)
 }
 
+// GetEventByID devuelve un evento específico por su ID.
+//
+// @Summary Obtener evento por ID
+// @Description Obtiene los detalles completos de un evento específico por su ID
+// @Tags eventos
+// @Produce json
+// @Param id path int true "ID del evento"
+// @Success 200 {object} Event "Detalles del evento"
+// @Failure 400 {string} string "Error en la solicitud"
+// @Failure 404 {string} string "Evento no encontrado"
+// @Failure 500 {string} string "Error interno del servidor"
+// @Router /events/{id} [get]
 func (h *AuthHandler) GetEventByID(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	var e Event
@@ -379,6 +399,19 @@ func (h *AuthHandler) GetEventByID(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(e)
 }
+
+// GetEventsByVenueID devuelve todos los eventos asociados a un venue específico.
+//
+// @Summary Obtener eventos por venue
+// @Description Obtiene todos los eventos que se realizan en un venue específico
+// @Tags eventos
+// @Produce json
+// @Param id path int true "ID del venue"
+// @Success 200 {array} Event "Lista de eventos del venue"
+// @Failure 400 {string} string "Error en la solicitud"
+// @Failure 404 {string} string "Venue no encontrado"
+// @Failure 500 {string} string "Error interno del servidor"
+// @Router /events/venue/{id} [get]
 func (h *AuthHandler) GetEventsByVenueID(w http.ResponseWriter, r *http.Request) {
 	venueID := chi.URLParam(r, "id")
 	query := `
@@ -430,6 +463,19 @@ func (h *AuthHandler) GetEventsByVenueID(w http.ResponseWriter, r *http.Request)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(events)
 }
+
+// GetEventsByBandID devuelve todos los eventos asociados a una banda específica.
+//
+// @Summary Obtener eventos por banda
+// @Description Obtiene todos los eventos en los que participa una banda específica
+// @Tags eventos
+// @Produce json
+// @Param id path int true "ID de la banda"
+// @Success 200 {array} Event "Lista de eventos de la banda"
+// @Failure 400 {string} string "Error en la solicitud"
+// @Failure 404 {string} string "Banda no encontrada"
+// @Failure 500 {string} string "Error interno del servidor"
+// @Router /events/band/{id} [get]
 func (h *AuthHandler) GetEventsByBandID(w http.ResponseWriter, r *http.Request) {
 	bandID := chi.URLParam(r, "id")
 	query := `
@@ -482,6 +528,68 @@ func (h *AuthHandler) GetEventsByBandID(w http.ResponseWriter, r *http.Request) 
 	json.NewEncoder(w).Encode(events)
 }
 
+// UploadEventImage maneja la subida de imágenes para eventos.
+//
+// @Summary Subir imagen de evento
+// @Description Sube una imagen para un evento y la almacena en DigitalOcean Spaces
+// @Tags eventos
+// @Accept multipart/form-data
+// @Produce json
+// @Param file formData file true "Archivo de imagen a subir"
+// @Param slug formData string true "Slug del evento"
+// @Security BearerAuth
+// @Success 200 {object} map[string]string "URL de la imagen subida"
+// @Failure 400 {string} string "Error en la solicitud"
+// @Failure 401 {string} string "No autorizado"
+// @Failure 500 {string} string "Error interno del servidor"
+// @Router /events/upload-image [post]
+func (h *AuthHandler) UploadEventImage(w http.ResponseWriter, r *http.Request) {
+	r.ParseMultipartForm(10 << 20)
+	file, handler, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, "No se pudo leer el archivo", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	slug := r.FormValue("slug")
+	if slug == "" {
+		http.Error(w, "Slug faltante", http.StatusBadRequest)
+		return
+	}
+
+	tempFile, err := os.CreateTemp("", "upload-*.jpg")
+	if err != nil {
+		http.Error(w, "No se pudo crear archivo temporal", http.StatusInternalServerError)
+		return
+	}
+	defer os.Remove(tempFile.Name())
+	io.Copy(tempFile, file)
+
+	err = uploadToSpaces(tempFile.Name(), "events/"+slug+".jpg", handler.Header.Get("Content-Type"))
+	if err != nil {
+		http.Error(w, "Error al subir imagen: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]string{"message": "Imagen subida con éxito"})
+}
+
+// CreateEvent crea un nuevo evento en la base de datos.
+//
+// @Summary Crear evento
+// @Description Crea un nuevo evento con la información proporcionada
+// @Tags eventos
+// @Accept json
+// @Produce json
+// @Param event body Event true "Datos del evento a crear"
+// @Security BearerAuth
+// @Success 201 {object} Event "Evento creado exitosamente"
+// @Failure 400 {string} string "Error en la solicitud"
+// @Failure 401 {string} string "No autorizado"
+// @Failure 500 {string} string "Error interno del servidor"
+// @Router /events [post]
 func (h *AuthHandler) CreateEvent(w http.ResponseWriter, r *http.Request) {
 	type EventInput struct {
 		IDVenue   int    `json:"id_venue"`
@@ -536,6 +644,22 @@ func (h *AuthHandler) CreateEvent(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// UpdateEvent actualiza un evento existente en la base de datos.
+//
+// @Summary Actualizar evento
+// @Description Actualiza la información de un evento existente
+// @Tags eventos
+// @Accept json
+// @Produce json
+// @Param id path int true "ID del evento a actualizar"
+// @Param event body Event true "Datos actualizados del evento"
+// @Security BearerAuth
+// @Success 200 {object} Event "Evento actualizado exitosamente"
+// @Failure 400 {string} string "Error en la solicitud"
+// @Failure 401 {string} string "No autorizado"
+// @Failure 404 {string} string "Evento no encontrado"
+// @Failure 500 {string} string "Error interno del servidor"
+// @Router /events/{id} [put]
 func (h *AuthHandler) UpdateEvent(w http.ResponseWriter, r *http.Request) {
 	type EventInput struct {
 		IDVenue   int    `json:"id_venue"`
@@ -581,6 +705,20 @@ func (h *AuthHandler) UpdateEvent(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+// DeleteEvent elimina un evento de la base de datos.
+//
+// @Summary Eliminar evento
+// @Description Elimina un evento existente y sus relaciones con bandas
+// @Tags eventos
+// @Produce json
+// @Param id path int true "ID del evento a eliminar"
+// @Security BearerAuth
+// @Success 200 {object} map[string]string "Mensaje de éxito"
+// @Failure 400 {string} string "Error en la solicitud"
+// @Failure 401 {string} string "No autorizado"
+// @Failure 404 {string} string "Evento no encontrado"
+// @Failure 500 {string} string "Error interno del servidor"
+// @Router /events/{id} [delete]
 func (h *AuthHandler) DeleteEvent(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
