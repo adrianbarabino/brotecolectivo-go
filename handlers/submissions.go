@@ -936,10 +936,18 @@ func (h *AuthHandler) ApproveSubmission(w http.ResponseWriter, r *http.Request) 
 			http.Error(w, "Error al parsear datos", http.StatusBadRequest)
 			return
 		}
+		// Determine venue ID safely
+		var venueID int
+		if event.Venue != nil {
+			venueID = event.Venue.ID
+		} else {
+			venueID = event.VenueID
+		}
+
 		eventID, err := h.DB.Insert(false, `
 		INSERT INTO events (id_venue, title, tags, content, slug, date_start, date_end)
 		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			event.Venue.ID, event.Title, event.Tags, event.Content, event.Slug, event.DateStart, event.DateEnd)
+			venueID, event.Title, event.Tags, event.Content, event.Slug, event.DateStart, event.DateEnd)
 
 		if err != nil {
 			http.Error(w, "Error al crear evento", http.StatusInternalServerError)
