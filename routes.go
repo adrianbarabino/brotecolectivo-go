@@ -108,10 +108,11 @@ func InitRoutes(authHandler *handlers.AuthHandler) *chi.Mux {
 		r.Get("/venue/{id}", authHandler.GetEventsByVenueID) // Eventos por venue
 
 		r.Route("/{id}", func(r chi.Router) {
-			r.Get("/", authHandler.GetEventByID)       // Obtener detalles de evento
-			r.Put("/", authHandler.UpdateEvent)        // Actualizar evento
-			r.Delete("/", authHandler.DeleteEvent)     // Eliminar evento
-			r.Get("/bands", authHandler.GetEventBands) // Obtener bandas asociadas al evento
+			r.Get("/", authHandler.GetEventByID)                                                   // Obtener detalles de evento
+			r.Put("/", authHandler.UpdateEvent)                                                    // Actualizar evento
+			r.Delete("/", authHandler.DeleteEvent)                                                 // Eliminar evento
+			r.Get("/bands", authHandler.GetEventBands)                                             // Obtener bandas asociadas al evento
+			r.With(AuthMiddleware).Post("/publish-instagram", authHandler.PublishEventToInstagram) // Publicar evento en Instagram
 		})
 	})
 
