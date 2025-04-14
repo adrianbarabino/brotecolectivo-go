@@ -1,36 +1,34 @@
 package handlers
 
 import (
+	"bytes"
 	"crypto/sha256"
-	"encoding/hex"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/color"
+	"image/jpeg"
 	"io"
-	"bytes"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
-	"regexp"
 
 	"brotecolectivo/models"
 
 	"github.com/go-chi/chi/v5"
 	"gopkg.in/ini.v1"
-"image"
-"image/color"
-"image/jpeg"
 
-drawImage "golang.org/x/image/draw"
-"golang.org/x/image/font"
-"golang.org/x/image/font/opentype"
-"golang.org/x/image/math/fixed"
-
-"log"
-
+	drawImage "golang.org/x/image/draw"
+	"golang.org/x/image/font"
+	"golang.org/x/image/font/opentype"
+	"golang.org/x/image/math/fixed"
 )
 
 // Event representa un evento cultural en la plataforma Brote Colectivo.
@@ -1086,7 +1084,7 @@ func (h *AuthHandler) PublishEventToInstagramByID(eventID int) error {
 	}
 	contentCleaned := cleanHTML(event.Content)
 
-	caption := fmt.Sprintf("🎵 %s\n\n📍 %s\n📅 %s\n\n%s\n\n#BroteColectivo #AgendaCulturalBroteColectivo #AgendaCultural #Música #Eventos", 
+	caption := fmt.Sprintf("🎵 %s\n\n📍 %s\n📅 %s\n\n%s\n\n#BroteColectivo #AgendaCulturalBroteColectivo #AgendaCultural #Música #Eventos",
 		event.Title, venueName, event.DateStart, contentCleaned)
 
 	// Crear media container
@@ -1125,70 +1123,70 @@ func (h *AuthHandler) PublishEventToInstagramByID(eventID int) error {
 		return fmt.Errorf("error al publicar en feed: %v", err)
 	}
 	defer publishRes.Body.Close()
-// === GENERAR Y PUBLICAR STORY ===
-generatedPath, err := h.GenerateStoryImageFromEvent(eventID, imageURL)
-if err != nil {
-	log.Printf("Error generando imagen de story: %v", err)
-	return nil // no detenemos el proceso
-}
+	// === GENERAR Y PUBLICAR STORY ===
+	generatedPath, err := h.GenerateStoryImageFromEvent(eventID, imageURL)
+	if err != nil {
+		log.Printf("Error generando imagen de story: %v", err)
+		return nil // no detenemos el proceso
+	}
 
-hasher := sha256.New()
-hasher.Write([]byte(imageURL))
-flyerHash := hex.EncodeToString(hasher.Sum(nil))[:8]
-storyObjectPath := fmt.Sprintf("events/stories/%s-%s.jpg", event.Slug, flyerHash)
+	hasher := sha256.New()
+	hasher.Write([]byte(imageURL))
+	flyerHash := hex.EncodeToString(hasher.Sum(nil))[:8]
+	storyObjectPath := fmt.Sprintf("events/stories/%s-%s.jpg", event.Slug, flyerHash)
 
-err = uploadToSpaces(generatedPath, storyObjectPath, "image/jpeg")
-if err != nil {
-	log.Printf("Error subiendo imagen de story: %v", err)
-	return nil // no detenemos el proceso
-}
+	err = uploadToSpaces(generatedPath, storyObjectPath, "image/jpeg")
+	if err != nil {
+		log.Printf("Error subiendo imagen de story: %v", err)
+		return nil // no detenemos el proceso
+	}
 
-storyImageURL := fmt.Sprintf("%s/%s", mediaURL, storyObjectPath)
+	storyImageURL := fmt.Sprintf("%s/%s", mediaURL, storyObjectPath)
 
-storyURL := fmt.Sprintf(
-	"https://graph.facebook.com/v21.0/%s/media?access_token=%s&media_type=STORIES&image_url=%s",
-	businessID,
-	accessToken,
-	url.QueryEscape(storyImageURL),
-)
+	storyURL := fmt.Sprintf(
+		"https://graph.facebook.com/v21.0/%s/media?access_token=%s&media_type=STORIES&image_url=%s",
+		businessID,
+		accessToken,
+		url.QueryEscape(storyImageURL),
+	)
 
-resStory, err := http.Post(storyURL, "application/json", nil)
-if err != nil {
-	log.Printf("Error creando story container: %v", err)
-	return nil
-}
-defer resStory.Body.Close()
+	resStory, err := http.Post(storyURL, "application/json", nil)
+	if err != nil {
+		log.Printf("Error creando story container: %v", err)
+		return nil
+	}
+	defer resStory.Body.Close()
 
-bodyStory, _ := io.ReadAll(resStory.Body)
+	bodyStory, _ := io.ReadAll(resStory.Body)
 
-var storyData struct {
-	ID    string `json:"id"`
-	Error struct {
-		Message string `json:"message"`
-		Type    string `json:"type"`
-		Code    int    `json:"code"`
-	} `json:"error"`
-}
+	var storyData struct {
+		ID    string `json:"id"`
+		Error struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+			Code    int    `json:"code"`
+		} `json:"error"`
+	}
 
-if err := json.Unmarshal(bodyStory, &storyData); err != nil {
-	log.Printf("Error al parsear story response: %v", err)
-	return nil
-}
-if storyData.ID == "" {
-	log.Printf("Error al crear story: %s (tipo: %s, código: %d)", storyData.Error.Message, storyData.Error.Type, storyData.Error.Code)
-	return nil
-}
+	if err := json.Unmarshal(bodyStory, &storyData); err != nil {
+		log.Printf("Error al parsear story response: %v", err)
+		return nil
+	}
+	if storyData.ID == "" {
+		log.Printf("Error al crear story: %s (tipo: %s, código: %d)", storyData.Error.Message, storyData.Error.Type, storyData.Error.Code)
+		return nil
+	}
 
-publishStory := fmt.Sprintf("https://graph.facebook.com/v21.0/%s/media_publish?creation_id=%s&access_token=%s",
-	businessID, storyData.ID, accessToken,
-)
+	publishStory := fmt.Sprintf("https://graph.facebook.com/v21.0/%s/media_publish?creation_id=%s&access_token=%s",
+		businessID, storyData.ID, accessToken,
+	)
 
-_, err = http.Post(publishStory, "application/json", nil)
-if err != nil {
-	log.Printf("Error al publicar story: %v", err)
-	return nil
-}
-log.Printf("Story publicada correctamente para evento %d", eventID)
+	_, err = http.Post(publishStory, "application/json", nil)
+	if err != nil {
+		log.Printf("Error al publicar story: %v", err)
+		return nil
+	}
+	log.Printf("Story publicada correctamente para evento %d", eventID)
 
 	return nil
 }
@@ -1196,7 +1194,7 @@ log.Printf("Story publicada correctamente para evento %d", eventID)
 // PublishEventToInstagram publica un evento en Instagram (feed y story)
 func (h *AuthHandler) PublishEventToInstagram(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("[DEBUG] Iniciando publicación en Instagram")
-	
+
 	// Verificar autenticación (solo admin)
 	// claims, ok := r.Context().Value("user").(*models.Claims)
 	// if !ok || claims.Role != "admin" {
@@ -1263,10 +1261,10 @@ func (h *AuthHandler) PublishEventToInstagram(w http.ResponseWriter, r *http.Req
 	// Limpiar el contenido HTML
 	contentCleaned := cleanHTML(event.Content)
 	fmt.Printf("[DEBUG] Contenido limpio: %s\n", contentCleaned)
-	
-	caption := fmt.Sprintf("🎵 %s\n\n📍 %s\n📅 %s\n\n%s\n\n#BroteColectivo #AgendaCulturalBroteColectivo #AgendaCultural #Música #Eventos", 
-		event.Title, 
-		venueName, 
+
+	caption := fmt.Sprintf("🎵 %s\n\n📍 %s\n📅 %s\n\n%s\n\n#BroteColectivo #AgendaCulturalBroteColectivo #AgendaCultural #Música #Eventos",
+		event.Title,
+		venueName,
 		event.DateStart,
 		contentCleaned,
 	)
@@ -1303,19 +1301,19 @@ func (h *AuthHandler) PublishEventToInstagram(w http.ResponseWriter, r *http.Req
 		result.Success = false
 	} else {
 		var feedData struct {
-			ID string `json:"id"`
+			ID    string `json:"id"`
 			Error struct {
-				Message string `json:"message"`
-				Type    string `json:"type"`
-				Code    int    `json:"code"`
-				SubCode int    `json:"subcode,omitempty"`
+				Message        string `json:"message"`
+				Type           string `json:"type"`
+				Code           int    `json:"code"`
+				SubCode        int    `json:"subcode,omitempty"`
 				ErrorUserTitle string `json:"error_user_title,omitempty"`
-				ErrorUserMsg string `json:"error_user_msg,omitempty"`
+				ErrorUserMsg   string `json:"error_user_msg,omitempty"`
 			} `json:"error"`
 		}
 		body, _ := io.ReadAll(feedRes.Body)
 		fmt.Printf("[DEBUG] Respuesta del feed (status %d): %s\n", feedRes.StatusCode, string(body))
-		
+
 		if err := json.Unmarshal(body, &feedData); err != nil {
 			fmt.Printf("[DEBUG] Error al decodificar respuesta del feed: %v\n", err)
 		}
@@ -1329,7 +1327,7 @@ func (h *AuthHandler) PublishEventToInstagram(w http.ResponseWriter, r *http.Req
 				accessToken,
 			)
 			fmt.Printf("[DEBUG] URL de publicación (sin token): %s\n", strings.Replace(publishURL, accessToken, "TOKEN_REMOVED", 1))
-			
+
 			publishRes, err := http.Post(publishURL, "application/json", nil)
 			if err != nil {
 				fmt.Printf("[DEBUG] Error al publicar contenido: %v\n", err)
@@ -1339,13 +1337,13 @@ func (h *AuthHandler) PublishEventToInstagram(w http.ResponseWriter, r *http.Req
 			} else {
 				body, _ := io.ReadAll(publishRes.Body)
 				fmt.Printf("[DEBUG] Respuesta de publicación (status %d): %s\n", publishRes.StatusCode, string(body))
-				
+
 				var publishData struct {
-					ID string `json:"id"`
+					ID    string `json:"id"`
 					Error struct {
 						Message string `json:"message"`
-						Type string `json:"type"`
-						Code int `json:"code"`
+						Type    string `json:"type"`
+						Code    int    `json:"code"`
 					} `json:"error"`
 				}
 				if err := json.Unmarshal(body, &publishData); err != nil {
@@ -1356,7 +1354,7 @@ func (h *AuthHandler) PublishEventToInstagram(w http.ResponseWriter, r *http.Req
 					result.Feed.Message = fmt.Sprintf("Publicado correctamente. Post ID: %s", publishData.ID)
 				} else if publishData.Error.Message != "" {
 					result.Feed.Success = false
-					result.Feed.Message = fmt.Sprintf("Error al publicar: %s (Tipo: %s, Código: %d)", 
+					result.Feed.Message = fmt.Sprintf("Error al publicar: %s (Tipo: %s, Código: %d)",
 						publishData.Error.Message,
 						publishData.Error.Type,
 						publishData.Error.Code)
@@ -1367,9 +1365,9 @@ func (h *AuthHandler) PublishEventToInstagram(w http.ResponseWriter, r *http.Req
 		} else if feedData.Error.Message != "" {
 			fmt.Printf("[DEBUG] Error del feed: %+v\n", feedData.Error)
 			result.Feed.Success = false
-			result.Feed.Message = fmt.Sprintf("Error: %s (Tipo: %s, Código: %d, SubCode: %d)\nTítulo: %s\nMensaje: %s", 
-				feedData.Error.Message, 
-				feedData.Error.Type, 
+			result.Feed.Message = fmt.Sprintf("Error: %s (Tipo: %s, Código: %d, SubCode: %d)\nTítulo: %s\nMensaje: %s",
+				feedData.Error.Message,
+				feedData.Error.Type,
 				feedData.Error.Code,
 				feedData.Error.SubCode,
 				feedData.Error.ErrorUserTitle,
@@ -1383,113 +1381,111 @@ func (h *AuthHandler) PublishEventToInstagram(w http.ResponseWriter, r *http.Req
 		http.Error(w, "ID del evento inválido", http.StatusBadRequest)
 		return
 	}
-	
+
 	generatedPath, err := h.GenerateStoryImageFromEvent(eventIDInt, imageURL)
 	if err != nil {
-	log.Printf("Error generando imagen de story: %v", err)
-	// fallback a la imagen original si querés
-}
+		log.Printf("Error generando imagen de story: %v", err)
+		// fallback a la imagen original si querés
+	}
 
-hasher := sha256.New()
-hasher.Write([]byte(imageURL))
-flyerHash := hex.EncodeToString(hasher.Sum(nil))[:8] // usamos solo 8 caracteres para no hacerlo tan largo
+	hasher := sha256.New()
+	hasher.Write([]byte(imageURL))
+	flyerHash := hex.EncodeToString(hasher.Sum(nil))[:8] // usamos solo 8 caracteres para no hacerlo tan largo
 
-storyObjectPath := fmt.Sprintf("events/stories/%s-%s.jpg", event.Slug, flyerHash)
+	storyObjectPath := fmt.Sprintf("events/stories/%s-%s.jpg", event.Slug, flyerHash)
 
-err = uploadToSpaces(generatedPath, storyObjectPath, "image/jpeg")
-if err != nil {
-	log.Printf("Error subiendo imagen de story: %v", err)
-	// podés usar imageURL como fallback
-}
-storyImageURL := fmt.Sprintf("%s/%s", mediaURL, storyObjectPath)
+	err = uploadToSpaces(generatedPath, storyObjectPath, "image/jpeg")
+	if err != nil {
+		log.Printf("Error subiendo imagen de story: %v", err)
+		// podés usar imageURL como fallback
+	}
+	storyImageURL := fmt.Sprintf("%s/%s", mediaURL, storyObjectPath)
 
-// first create the mediaContainer
-mediaContainerURL := fmt.Sprintf("https://graph.facebook.com/v21.0/%s/media?access_token=%s&media_type=STORIES&image_url=%s",
-	businessID,
-	accessToken,
-	url.QueryEscape(storyImageURL),
-)
+	// first create the mediaContainer
+	mediaContainerURL := fmt.Sprintf("https://graph.facebook.com/v21.0/%s/media?access_token=%s&media_type=STORIES&image_url=%s",
+		businessID,
+		accessToken,
+		url.QueryEscape(storyImageURL),
+	)
 
-mediaContainerRes, err := http.Post(mediaContainerURL, "application/json", nil)
-if err != nil {
-	fmt.Printf("[DEBUG] Error al crear el contenedor de medios: %v\n", err)
-	result.Story.Success = false
-	result.Story.Message = err.Error()
-	result.Success = false
-	return
-}
-// Leer el body del response del contenedor de medios
-body, _ := io.ReadAll(mediaContainerRes.Body)
+	mediaContainerRes, err := http.Post(mediaContainerURL, "application/json", nil)
+	if err != nil {
+		fmt.Printf("[DEBUG] Error al crear el contenedor de medios: %v\n", err)
+		result.Story.Success = false
+		result.Story.Message = err.Error()
+		result.Success = false
+		return
+	}
+	// Leer el body del response del contenedor de medios
+	body, _ := io.ReadAll(mediaContainerRes.Body)
 
-fmt.Printf("[DEBUG] Respuesta del story (status %d): %s\n", mediaContainerRes.StatusCode, string(body))
-mediaContainerRes.Body.Close()
+	fmt.Printf("[DEBUG] Respuesta del story (status %d): %s\n", mediaContainerRes.StatusCode, string(body))
+	mediaContainerRes.Body.Close()
 
-// Parsear el JSON para obtener el creation_id
-var storyData struct {
-	ID    string `json:"id"`
-	Error struct {
-		Message         string `json:"message"`
-		Type            string `json:"type"`
-		Code            int    `json:"code"`
-		ErrorUserTitle  string `json:"error_user_title,omitempty"`
-		ErrorUserMsg    string `json:"error_user_msg,omitempty"`
-	} `json:"error"`
-}
+	// Parsear el JSON para obtener el creation_id
+	var storyData struct {
+		ID    string `json:"id"`
+		Error struct {
+			Message        string `json:"message"`
+			Type           string `json:"type"`
+			Code           int    `json:"code"`
+			ErrorUserTitle string `json:"error_user_title,omitempty"`
+			ErrorUserMsg   string `json:"error_user_msg,omitempty"`
+		} `json:"error"`
+	}
 
-if err := json.Unmarshal(body, &storyData); err != nil {
-	log.Printf("[DEBUG] Error al parsear respuesta del story: %v", err)
-	result.Story.Success = false
-	result.Story.Message = "Error al parsear respuesta del story"
-	result.Success = false
-	return
-}
+	if err := json.Unmarshal(body, &storyData); err != nil {
+		log.Printf("[DEBUG] Error al parsear respuesta del story: %v", err)
+		result.Story.Success = false
+		result.Story.Message = "Error al parsear respuesta del story"
+		result.Success = false
+		return
+	}
 
-if storyData.ID == "" {
-	log.Printf("[DEBUG] Error del contenedor: %+v\n", storyData.Error)
-	result.Story.Success = false
-	result.Story.Message = fmt.Sprintf("Error: %s (Tipo: %s, Código: %d)", storyData.Error.Message, storyData.Error.Type, storyData.Error.Code)
-	result.Success = false
-	return
-}
+	if storyData.ID == "" {
+		log.Printf("[DEBUG] Error del contenedor: %+v\n", storyData.Error)
+		result.Story.Success = false
+		result.Story.Message = fmt.Sprintf("Error: %s (Tipo: %s, Código: %d)", storyData.Error.Message, storyData.Error.Type, storyData.Error.Code)
+		result.Success = false
+		return
+	}
 
-// Usar el creation_id correctamente
-creationId := storyData.ID
-storyPublish := fmt.Sprintf("https://graph.facebook.com/v21.0/%s/media_publish?creation_id=%s&access_token=%s",
-	businessID,
-	creationId,
-	accessToken,
-)
+	// Usar el creation_id correctamente
+	creationId := storyData.ID
+	storyPublish := fmt.Sprintf("https://graph.facebook.com/v21.0/%s/media_publish?creation_id=%s&access_token=%s",
+		businessID,
+		creationId,
+		accessToken,
+	)
 
-storyPublishRes, err := http.Post(storyPublish, "application/json", nil)
-if err != nil {
-	fmt.Printf("[DEBUG] Error al publicar story: %v\n", err)
-	result.Story.Success = false
-	result.Story.Message = err.Error()
-	result.Success = false
-	return
-}
+	storyPublishRes, err := http.Post(storyPublish, "application/json", nil)
+	if err != nil {
+		fmt.Printf("[DEBUG] Error al publicar story: %v\n", err)
+		result.Story.Success = false
+		result.Story.Message = err.Error()
+		result.Success = false
+		return
+	}
 
-defer storyPublishRes.Body.Close()
+	defer storyPublishRes.Body.Close()
 
+	if storyData.ID == "" {
+		log.Printf("[DEBUG] Error del story: %+v\n", storyData.Error)
+		result.Story.Success = false
+		result.Story.Message = fmt.Sprintf("Error: %s (Tipo: %s, Código: %d)", storyData.Error.Message, storyData.Error.Type, storyData.Error.Code)
+		result.Success = false
+		return
+	}
 
-if storyData.ID == "" {
-	log.Printf("[DEBUG] Error del story: %+v\n", storyData.Error)
-	result.Story.Success = false
-	result.Story.Message = fmt.Sprintf("Error: %s (Tipo: %s, Código: %d)", storyData.Error.Message, storyData.Error.Type, storyData.Error.Code)
-	result.Success = false
-	return
-}
+	fmt.Printf("[DEBUG] Story publicado correctamente. Post ID: %s\n", storyData.ID)
+	result.Story.Success = true
+	result.Story.Message = fmt.Sprintf("Publicado correctamente. Post ID: %s", storyData.ID)
+	result.Success = true
 
-fmt.Printf("[DEBUG] Story publicado correctamente. Post ID: %s\n", storyData.ID)
-result.Story.Success = true
-result.Story.Message = fmt.Sprintf("Publicado correctamente. Post ID: %s", storyData.ID)
-result.Success = true
-
-
-w.Header().Set("Content-Type", "application/json")
-responseJSON, _ := json.MarshalIndent(result, "", "  ")
-fmt.Printf("[DEBUG] Respuesta final: %s\n", string(responseJSON))
-json.NewEncoder(w).Encode(result)
+	w.Header().Set("Content-Type", "application/json")
+	responseJSON, _ := json.MarshalIndent(result, "", "  ")
+	fmt.Printf("[DEBUG] Respuesta final: %s\n", string(responseJSON))
+	json.NewEncoder(w).Encode(result)
 }
 
 // Función auxiliar para formatear la fecha del evento
@@ -1649,11 +1645,11 @@ func GenerateStoryImageFromFlyer(title, flyerURL, date, hour, venue string) (str
 	// Título
 	d.Face = titleFace
 	maxWidth := width - 100 // Margen de 50px a cada lado
-	
+
 	lines := []string{}
 	words := strings.Fields(title)
 	line := ""
-	
+
 	for _, word := range words {
 		testLine := line + " " + word
 		if d.MeasureString(strings.TrimSpace(testLine)).Round() > maxWidth {
@@ -1666,7 +1662,7 @@ func GenerateStoryImageFromFlyer(title, flyerURL, date, hour, venue string) (str
 	if line != "" {
 		lines = append(lines, strings.TrimSpace(line))
 	}
-	
+
 	yOffset := targetHeight + 100
 	for _, l := range lines {
 		lineWidth := d.MeasureString(l).Round()
@@ -1681,46 +1677,44 @@ func GenerateStoryImageFromFlyer(title, flyerURL, date, hour, venue string) (str
 	subtitle1Width := d.MeasureString(subtitle1).Round()
 	d.Dot = fixed.P((width-subtitle1Width)/2, yOffset+20)
 	d.DrawString(subtitle1)
-	
+
 	subtitle2Width := d.MeasureString(subtitle2).Round()
 	d.Dot = fixed.P((width-subtitle2Width)/2, yOffset+70)
 	d.DrawString(subtitle2)
 
 	promoText := "Enterate de este evento y otros en #AgendaCultural"
-d.Face = promoFace // ¡Muy importante! Definir la fuente antes de medir
+	d.Face = promoFace // ¡Muy importante! Definir la fuente antes de medir
 
-maxWidthPromo := width - 100
-var linesPromo []string
-wordsPromo := strings.Fields(promoText)
-currentLine := ""
+	maxWidthPromo := width - 100
+	var linesPromo []string
+	wordsPromo := strings.Fields(promoText)
+	currentLine := ""
 
-for _, word := range wordsPromo {
-	testLine := strings.TrimSpace(currentLine + " " + word)
-	testWidth := font.MeasureString(promoFace, testLine).Round()
+	for _, word := range wordsPromo {
+		testLine := strings.TrimSpace(currentLine + " " + word)
+		testWidth := font.MeasureString(promoFace, testLine).Round()
 
-	if testWidth > maxWidthPromo && currentLine != "" {
-		linesPromo = append(linesPromo, strings.TrimSpace(currentLine))
-		currentLine = word
-	} else {
-		if currentLine != "" {
-			currentLine += " "
+		if testWidth > maxWidthPromo && currentLine != "" {
+			linesPromo = append(linesPromo, strings.TrimSpace(currentLine))
+			currentLine = word
+		} else {
+			if currentLine != "" {
+				currentLine += " "
+			}
+			currentLine += word
 		}
-		currentLine += word
 	}
-}
-if currentLine != "" {
-	linesPromo = append(linesPromo, currentLine)
-}
+	if currentLine != "" {
+		linesPromo = append(linesPromo, currentLine)
+	}
 
-// Dibujar las líneas empezando desde más arriba
-startY := height - 320
-for i, line := range linesPromo {
-	lineWidth := d.MeasureString(line).Round()
-	d.Dot = fixed.P((width-lineWidth)/2, startY+(i*48))
-	d.DrawString(line)
-}
-
-	
+	// Dibujar las líneas empezando desde más arriba
+	startY := height - 320
+	for i, line := range linesPromo {
+		lineWidth := d.MeasureString(line).Round()
+		d.Dot = fixed.P((width-lineWidth)/2, startY+(i*48))
+		d.DrawString(line)
+	}
 
 	// Sitio
 	siteText := "www.brotecolectivo.com"
@@ -1769,7 +1763,6 @@ for i, line := range linesPromo {
 
 	return tmpFile.Name(), nil
 }
-
 
 // renewInstagramToken intenta renovar el token de acceso de Instagram
 func (h *AuthHandler) renewInstagramToken() error {
@@ -1830,16 +1823,16 @@ func cleanHTML(html string) string {
 	html = strings.ReplaceAll(html, "<br>", "\n\n")
 	html = strings.ReplaceAll(html, "<br/>", "\n")
 	html = strings.ReplaceAll(html, "<br />", "\n")
-	
+
 	// Removemos todas las etiquetas HTML
 	re := regexp.MustCompile("<[^>]*>")
 	text := re.ReplaceAllString(html, "")
-	
+
 	// Limpiamos espacios y saltos de línea múltiples
 	text = strings.TrimSpace(text)
 	re = regexp.MustCompile(`\s+`)
 	text = re.ReplaceAllString(text, " ")
-	
+
 	// Decodificamos entidades HTML comunes
 	text = strings.ReplaceAll(text, "&nbsp;", " ")
 	text = strings.ReplaceAll(text, "&amp;", "&")
@@ -1852,7 +1845,6 @@ func cleanHTML(html string) string {
 	text = strings.ReplaceAll(text, "&ntilde;", "ñ")
 	text = strings.ReplaceAll(text, "&aacute;", "á")
 	text = strings.ReplaceAll(text, "&eacute;", "é")
-
 
 	text = strings.ReplaceAll(text, "&oacute;", "ó")
 	text = strings.ReplaceAll(text, "&uacute;", "ú")
@@ -1869,7 +1861,7 @@ func cleanHTML(html string) string {
 	text = strings.ReplaceAll(text, "&copy;", "©")
 	text = strings.ReplaceAll(text, "&reg;", "®")
 	text = strings.ReplaceAll(text, "&trade;", "™")
-	
+
 	return text
 }
 
