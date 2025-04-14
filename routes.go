@@ -65,6 +65,7 @@ func InitRoutes(authHandler *handlers.AuthHandler) *chi.Mux {
 		r.Get("/table", authHandler.GetBandsDatatable)       // Datos para DataTables
 		r.Post("/upload-image", authHandler.UploadBandImage) // Subir imagen de banda
 		r.Get("/slug/{slug}", authHandler.CheckBandSlug)     // Verificar disponibilidad de slug
+		r.With(AuthMiddleware).Post("/generate-bio", authHandler.GenerateArtistBio) // Generar biografía con IA
 
 		// Ruta protegida con autenticación
 		r.With(AuthMiddleware).Get("/user/{user_id}", authHandler.GetUserBands) // Obtener artistas vinculados a un usuario
@@ -100,20 +101,26 @@ func InitRoutes(authHandler *handlers.AuthHandler) *chi.Mux {
 		r.Get("/slug/{slug}", authHandler.CheckEventSlug) // Verificar disponibilidad de slug
 
 		r.Get("/", authHandler.GetEvents)    // Listar todos los eventos
-		r.Post("/", authHandler.CreateEvent) // Crear nuevo evento
+		r.Post("/upload-image", authHandler.UploadEventImage)
+		r.With(AuthMiddleware).Post("/generate-description", authHandler.GenerateEventDescription)
 
-		r.With(AuthMiddleware).Get("/user/{user_id}", authHandler.GetUserEvents) // Obtener eventos vinculados a un usuario
+		r.With(AuthMiddleware).Group(func(r chi.Router) {
+			r.Post("/", authHandler.CreateEvent) // Crear nuevo evento
 
-		r.Get("/band/{id}", authHandler.GetEventsByBandID)   // Eventos por banda
-		r.Get("/venue/{id}", authHandler.GetEventsByVenueID) // Eventos por venue
+			r.Get("/user/{user_id}", authHandler.GetUserEvents) // Obtener eventos vinculados a un usuario
 
-		r.Route("/{id}", func(r chi.Router) {
-			r.Get("/", authHandler.GetEventByID)                                                   // Obtener detalles de evento
-			r.Put("/", authHandler.UpdateEvent)                                                    // Actualizar evento
-			r.Delete("/", authHandler.DeleteEvent)                                                 // Eliminar evento
-			r.Get("/bands", authHandler.GetEventBands)                                             // Obtener bandas asociadas al evento
-			r.With(AuthMiddleware).Post("/publish-instagram", authHandler.PublishEventToInstagram) // Publicar evento en Instagram
+			r.Get("/band/{id}", authHandler.GetEventsByBandID)   // Eventos por banda
+			r.Get("/venue/{id}", authHandler.GetEventsByVenueID) // Eventos por venue
+
+			r.Route("/{id}", func(r chi.Router) {
+				r.Get("/", authHandler.GetEventByID)                                                   // Obtener detalles de evento
+				r.Put("/", authHandler.UpdateEvent)                                                    // Actualizar evento
+				r.Delete("/", authHandler.DeleteEvent)                                                 // Eliminar evento
+				r.Get("/bands", authHandler.GetEventBands)                                             // Obtener bandas asociadas al evento
+				r.With(AuthMiddleware).Post("/publish-instagram", authHandler.PublishEventToInstagram) // Publicar evento en Instagram
+			})
 		})
+		r.Post("/{id}/publish-instagram", authHandler.PublishEventToInstagram) // Nueva ruta para publicar en Instagram
 	})
 
 	// Endpoint para solicitudes de vinculación de artistas
@@ -124,6 +131,7 @@ func InitRoutes(authHandler *handlers.AuthHandler) *chi.Mux {
 		r.Get("/", authHandler.GetSubmissions)                     // Listar todas las submissions
 		r.Post("/upload-image", authHandler.UploadSubmissionImage) // Subir imagen para submission
 		r.Post("/", authHandler.CreateSubmission)                  // Crear nueva submission
+		r.Post("/generate-content", authHandler.GenerateNewsContent) // Generar contenido con IA
 		r.Get("/{id}", authHandler.GetSubmissionByID)              // Obtener detalles de submission
 		r.Post("/{id}/approve", authHandler.ApproveSubmission)     // Aprobar submission
 		r.Put("/{id}", authHandler.UpdateSubmissionStatus)         // Actualizar estado de submission
@@ -143,6 +151,7 @@ func InitRoutes(authHandler *handlers.AuthHandler) *chi.Mux {
 		r.Get("/count", authHandler.GetNewsCount)            // Obtener conteo total de noticias
 		r.Post("/upload-image", authHandler.UploadNewsImage) // Subir imagen de noticia
 		r.Get("/table", authHandler.GetNewsDatatable)        // Datos para DataTables
+		r.Post("/generate-content", authHandler.GenerateNewsContent) // Generar contenido con IA
 
 		// CRUD principal
 		r.Get("/", authHandler.GetNews)     // Listar todas las noticias

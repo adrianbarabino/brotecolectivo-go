@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"image"
-
 	_ "image/gif"
 	"image/jpeg"
 	_ "image/png"
@@ -12,6 +11,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"bytes"
 
 	"brotecolectivo/models"
 
@@ -41,6 +41,12 @@ func getBucket() string {
 func getEndpoint() string {
 	cfg, _ := ini.Load("data.conf")
 	return cfg.Section("spaces").Key("endpoint").String()
+}
+
+// getOpenAIKey obtiene la clave de API de OpenAI desde el archivo de configuración
+func getOpenAIKey() string {
+	cfg, _ := ini.Load("data.conf")
+	return cfg.Section("openai").Key("api_key").String()
 }
 
 // CheckBandSlug verifica si un slug de banda ya existe en la base de datos.
@@ -564,27 +570,41 @@ func (h *AuthHandler) UpdateBand(w http.ResponseWriter, r *http.Request) {
 }
 
 // DeleteBand elimina una banda/artista de la base de datos.
-//
-// @Summary Eliminar banda
-// @Description Elimina una banda/artista y sus datos asociados
-// @Tags bands
-// @Accept json
-// @Produce json
-// @Param id path int true "ID de la banda a eliminar"
-// @Success 200 {object} map[string]string "Mensaje de éxito"
-// @Failure 400 {string} string "ID inválido"
-// @Failure 404 {string} string "Banda no encontrada"
-// @Failure 500 {string} string "Error al eliminar la banda"
-// @Security BearerAuth
-// @Router /bands/{id} [delete]
 func (h *AuthHandler) DeleteBand(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	_, err := h.DB.Delete(false, "DELETE FROM bands WHERE id = ?", id)
+
+	// Primero eliminar las referencias en artist_links
+	_, err := h.DB.Delete(false, "DELETE FROM artist_links WHERE artist_id = ?", id)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Error al eliminar referencias de artist_links: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+
+	// Eliminar las referencias en events_bands si existen
+	_, err = h.DB.Delete(false, "DELETE FROM events_bands WHERE id_band = ?", id)
+	if err != nil {
+		http.Error(w, "Error al eliminar referencias de events_bands: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Finalmente eliminar la banda
+	result, err := h.DB.Delete(false, "DELETE FROM bands WHERE id = ?", id)
+	if err != nil {
+		http.Error(w, "Error al eliminar la banda: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if result == 0 {
+		http.Error(w, "No se encontró la banda", http.StatusNotFound)
+		return
+	}
+
+	// Respuesta exitosa
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{
+		"status": "ok",
+		"message": "Banda eliminada correctamente",
+	})
 }
 
 // GetUserBands obtiene los artistas vinculados a un usuario específico.
@@ -631,9 +651,9 @@ func (h *AuthHandler) GetUserBands(w http.ResponseWriter, r *http.Request) {
 
 	// Consultar los artistas vinculados al usuario
 	rows, err := h.DB.Select(`
-		SELECT b.id, b.name, b.bio, b.slug, b.social, al.rol
+		SELECT DISTINCT b.id, b.name, b.bio, b.slug, b.social, al.rol
 		FROM bands b
-		JOIN artist_links al ON b.id = al.artist_id
+		INNER JOIN artist_links al ON b.id = al.artist_id
 		WHERE al.user_id = ? AND al.status = 'approved'
 		ORDER BY b.name ASC`, userID)
 
@@ -652,6 +672,7 @@ func (h *AuthHandler) GetUserBands(w http.ResponseWriter, r *http.Request) {
 		var rol string
 
 		if err := rows.Scan(&band.ID, &band.Name, &band.Bio, &band.Slug, &socialRaw, &rol); err != nil {
+			fmt.Printf("Error al escanear banda: %v\n", err)
 			continue // Saltamos este registro si hay error
 		}
 
@@ -725,4 +746,99 @@ func (h *AuthHandler) SearchBands(w http.ResponseWriter, r *http.Request) {
 	// Devolver los resultados como JSON
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(bands)
+}
+
+// GenerateArtistBio genera una biografía para un artista usando OpenAI
+func (h *AuthHandler) GenerateArtistBio(w http.ResponseWriter, r *http.Request) {
+	// Obtener el prompt del cuerpo de la solicitud
+	var requestData struct {
+		Name string `json:"name"`
+		Title string `json:"title"`
+		CustomPrompt string `json:"custom_prompt,omitempty"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&requestData); err != nil {
+		http.Error(w, "Error al leer el cuerpo de la solicitud", http.StatusBadRequest)
+		return
+	}
+
+	// Construir el prompt base
+	basePrompt := fmt.Sprintf(`Genera una descripción breve y concisa para la banda %s. 
+Reglas:
+1. Usa solo la información proporcionada, NO inventes detalles
+2. Usa formato HTML para resaltar elementos importantes (<b> para nombres, <i> para géneros)
+3. Máximo 2 oraciones cortas
+4. Estructura: [Nombre banda] es una banda de [género] integrada por [miembros con sus instrumentos]
+5. Si se proporciona información adicional, agrégala solo si es factual y relevante
+6. No uses puntos y aparte, solo punto final
+
+Información proporcionada: %s`, requestData.Name, requestData.CustomPrompt)
+	
+	// Combinar con el prompt personalizado si existe
+	finalPrompt := basePrompt
+
+	// Preparar la solicitud a OpenAI
+	openaiURL := "https://api.openai.com/v1/chat/completions"
+	requestBody := map[string]interface{}{
+		"model": "gpt-3.5-turbo",
+		"messages": []map[string]string{
+			{
+				"role":    "user",
+				"content": finalPrompt,
+			},
+		},
+		"temperature": 0.5, // Reducir la creatividad para obtener respuestas más concisas y factuales
+	}
+
+	jsonBody, err := json.Marshal(requestBody)
+	if err != nil {
+		http.Error(w, "Error al preparar la solicitud", http.StatusInternalServerError)
+		return
+	}
+
+	// Crear la solicitud HTTP
+	req, err := http.NewRequest("POST", openaiURL, bytes.NewBuffer(jsonBody))
+	if err != nil {
+		http.Error(w, "Error al crear la solicitud", http.StatusInternalServerError)
+		return
+	}
+
+	// Agregar headers
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+getOpenAIKey())
+
+	// Realizar la solicitud
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		http.Error(w, "Error al realizar la solicitud a OpenAI", http.StatusInternalServerError)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Leer la respuesta
+	var openaiResponse struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&openaiResponse); err != nil {
+		http.Error(w, "Error al leer la respuesta de OpenAI", http.StatusInternalServerError)
+		return
+	}
+
+	// Verificar que hay una respuesta
+	if len(openaiResponse.Choices) == 0 {
+		http.Error(w, "No se recibió respuesta de OpenAI", http.StatusInternalServerError)
+		return
+	}
+
+	// Devolver la biografía generada
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"bio": openaiResponse.Choices[0].Message.Content,
+	})
 }

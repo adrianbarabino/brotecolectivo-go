@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"bytes"
 )
 
 // News representa un artículo de noticias en la plataforma Brote Colectivo.
@@ -647,6 +648,116 @@ func (h *AuthHandler) DeleteNews(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// GenerateNewsContentRequest representa la solicitud para generar contenido de noticia
+type GenerateNewsContentRequest struct {
+	Title        string `json:"title"`
+	CustomPrompt string `json:"custom_prompt"`
+}
+
+// GenerateNewsContentResponse representa la respuesta del contenido generado
+type GenerateNewsContentResponse struct {
+	Content string `json:"content"`
+}
+
+// GenerateNewsContent genera contenido para una noticia usando OpenAI
+// @Summary Generar contenido de noticia con IA
+// @Description Genera contenido para una noticia usando OpenAI basado en el título y prompt personalizado
+// @Tags news
+// @Accept json
+// @Produce json
+// @Param request body GenerateNewsContentRequest true "Datos para generar el contenido"
+// @Security BearerAuth
+// @Success 200 {object} GenerateNewsContentResponse
+// @Failure 400 {string} string "Error en la solicitud"
+// @Failure 401 {string} string "No autorizado"
+// @Failure 500 {string} string "Error interno del servidor"
+// @Router /news/generate-content [post]
+func (h *AuthHandler) GenerateNewsContent(w http.ResponseWriter, r *http.Request) {
+	var req GenerateNewsContentRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	prompt := fmt.Sprintf(`Genera una noticia sobre: %s
+
+    %s
+
+    Instrucciones:
+    1. Escribe en español de Argentina
+    2. Usa un tono periodístico y profesional
+    3. No inventes datos que no se hayan proporcionado
+    4. Estructura: Comienza con un párrafo introductorio, luego desarrolla los detalles, y finaliza con un cierre
+    5. Si se proporciona información adicional, agrégala solo si es factual y relevante
+    6. Usa formato HTML para estructurar el contenido
+    7. Separa bien los párrafos usando etiquetas <p>
+    8. Evita usar "Ven", "eres" y otras expresiones españolas
+    9. Siempre en tercera persona
+    10. Ideal entre 3-4 párrafos`,
+        req.Title,
+        req.CustomPrompt)
+
+	openaiURL := "https://api.openai.com/v1/chat/completions"
+	requestBody := map[string]interface{}{
+		"model": "gpt-3.5-turbo",
+		"messages": []map[string]string{
+			{
+				"role":    "user",
+				"content": prompt,
+			},
+		},
+		"temperature": 0.5,
+	}
+
+	jsonBody, err := json.Marshal(requestBody)
+	if err != nil {
+		http.Error(w, "Error al preparar la solicitud", http.StatusInternalServerError)
+		return
+	}
+
+	httpReq, err := http.NewRequest("POST", openaiURL, bytes.NewBuffer(jsonBody))
+	if err != nil {
+		http.Error(w, "Error al crear la solicitud", http.StatusInternalServerError)
+		return
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+getOpenAIKey())
+
+	client := &http.Client{}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		http.Error(w, "Error al realizar la solicitud a OpenAI", http.StatusInternalServerError)
+		return
+	}
+	defer resp.Body.Close()
+
+	var openaiResponse struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&openaiResponse); err != nil {
+		http.Error(w, "Error al procesar la respuesta de OpenAI", http.StatusInternalServerError)
+		return
+	}
+
+	if len(openaiResponse.Choices) == 0 {
+		http.Error(w, "No se recibió contenido de OpenAI", http.StatusInternalServerError)
+		return
+	}
+
+	response := GenerateNewsContentResponse{
+		Content: openaiResponse.Choices[0].Message.Content,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
 }
 
 // Ayuda para chequear si es numérico

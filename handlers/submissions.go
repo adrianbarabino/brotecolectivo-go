@@ -8,13 +8,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"image"
+	"log"
 	"image/jpeg"
 	"io"
 	"net/http"
 	"os"
 	"strings"
 	"time"
-
+	"regexp"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -26,7 +27,66 @@ import (
 	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/go-chi/chi/v5"
 	"gopkg.in/ini.v1"
+	"golang.org/x/net/html"
+	"path/filepath"
 )
+
+func generateShortWhatsAppDescription(subType, rawDescription string, id int) string {
+	clean := stripHTML(rawDescription)
+	clean = sanitizeWhatsAppText(clean)
+
+	if len(clean) > 300 {
+		clean = clean[:297] + "..."
+	}
+
+	label := "DESCRIPCIÓN"
+	switch subType {
+	case "event", "eventvenue":
+		label = "EVENTO"
+	case "news":
+		label = "NOTICIA"
+	case "video":
+		label = "VIDEO"
+	case "band":
+		label = "BANDA"
+	case "artist_link":
+		label = "VINCULACIÓN"
+	}
+
+	return fmt.Sprintf("%s: %s (ID: %d)", label, clean, id)
+}
+
+func stripHTML(input string) string {
+	doc, err := html.Parse(strings.NewReader(input))
+	if err != nil {
+		return input
+	}
+	var f func(*html.Node) string
+	f = func(n *html.Node) string {
+		if n.Type == html.TextNode {
+			return n.Data
+		}
+		var out string
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			out += f(c)
+		}
+		return out
+	}
+	return f(doc)
+}
+
+func sanitizeWhatsAppText(text string) string {
+	// Reemplaza \n, \r y \t por espacios
+	text = strings.ReplaceAll(text, "\n", " ")
+	text = strings.ReplaceAll(text, "\r", " ")
+	text = strings.ReplaceAll(text, "\t", " ")
+
+	// Reemplaza múltiples espacios por uno solo
+	re := regexp.MustCompile(`\s{2,}`)
+	text = re.ReplaceAllString(text, " ")
+
+	return strings.TrimSpace(text)
+}
 
 func (h *AuthHandler) DirectApprove(w http.ResponseWriter, r *http.Request) {
 	// Diagnóstico de tabla artist_links
@@ -536,12 +596,7 @@ func sendSubmissionWhatsApp(phone string, sub Submission, name, description, slu
 	}
 
 	// Personalizar la descripción según el tipo de submission
-	customDescription := description
-	if sub.Type == "event" || sub.Type == "eventvenue" {
-		customDescription = fmt.Sprintf("EVENTO: %s (ID: %d)", description, sub.ID)
-	} else {
-		customDescription = fmt.Sprintf("%s (ID: %d)", description, sub.ID)
-	}
+	customDescription := generateShortWhatsAppDescription(sub.Type, description, sub.ID)
 
 	imageURL := fmt.Sprintf("https://brotecolectivo.sfo3.cdn.digitaloceanspaces.com/pending/%s.jpg", slug)
 	// Debug de URLs
@@ -954,6 +1009,12 @@ func (h *AuthHandler) ApproveSubmission(w http.ResponseWriter, r *http.Request) 
 		_ = moveImageInSpaces("pending/"+combined.Event.Slug+".jpg", "events/"+combined.Event.Slug+".jpg")
 		_, _ = h.DB.Update(false, `UPDATE submissions SET status = 'approved', reviewed_by = ? WHERE id = ?`, payload.ReviewerID, id)
 
+		go func() {
+			if err := h.PublishEventToInstagramByID(eventID); err != nil {
+				log.Printf("[WARN] No se pudo publicar en Instagram el evento %d: %v", eventID, err)
+			}
+		}()
+		
 		// Crear vinculación automática entre el usuario que envió el evento y el evento creado
 		if submissionUserID > 0 && eventID > 0 {
 			fmt.Println("Creando vinculación automática para evento: UserID=", submissionUserID, "EventID=", eventID)
@@ -1055,7 +1116,12 @@ func (h *AuthHandler) ApproveSubmission(w http.ResponseWriter, r *http.Request) 
 		// print submissionUserID and eventID
 		fmt.Println("submissionUserID:", submissionUserID)
 		fmt.Println("eventID:", eventID)
-
+		go func() {
+			if err := h.PublishEventToInstagramByID(eventID); err != nil {
+				log.Printf("[WARN] No se pudo publicar en Instagram el evento %d: %v", eventID, err)
+			}
+		}()
+		
 		// Crear vinculación automática entre el usuario que envió el evento y el evento creado
 		if submissionUserID > 0 && eventID > 0 {
 			fmt.Println("Creando vinculación automática para evento: UserID=", submissionUserID, "EventID=", eventID)
@@ -1278,12 +1344,7 @@ func (h *AuthHandler) ApproveSubmission(w http.ResponseWriter, r *http.Request) 
 		// Enviar notificación por WhatsApp si hay un número guardado
 		comment, _ := h.DB.SelectRow("SELECT comment FROM submissions WHERE id = ?", id)
 		var commentStr string
-		if err := comment.Scan(&commentStr); err != nil {
-			fmt.Println("Error al obtener comentario:", err)
-			// No interrumpimos el flujo, solo registramos el error
-		}
-
-		if strings.Contains(commentStr, "WhatsApp:") {
+		if err := comment.Scan(&commentStr); err == nil {
 			// Extraer número de WhatsApp
 			whatsappParts := strings.Split(commentStr, "WhatsApp:")
 			if len(whatsappParts) > 1 {
@@ -1361,7 +1422,7 @@ func (h *AuthHandler) ApproveSubmission(w http.ResponseWriter, r *http.Request) 
 								req.Header.Set("Authorization", "Bearer "+whatsappToken)
 
 								client := &http.Client{
-									Timeout: 30 * time.Second, // Agregar timeout para evitar bloqueos indefinidos
+									Timeout: 30 * time.Second,
 								}
 								resp, err := client.Do(req)
 								if err != nil {
@@ -1414,26 +1475,42 @@ func (h *AuthHandler) ApproveSubmission(w http.ResponseWriter, r *http.Request) 
 }
 
 func (h *AuthHandler) UploadSubmissionImage(w http.ResponseWriter, r *http.Request) {
+	// Debug: imprimir todos los valores del form
+	fmt.Println("Form values:", r.Form)
+	fmt.Println("MultipartForm:", r.MultipartForm)
+
 	err := r.ParseMultipartForm(10 << 20)
 	if err != nil {
-		http.Error(w, "No se pudo procesar la imagen", http.StatusBadRequest)
+		fmt.Println("Error parsing multipart form:", err)
+		http.Error(w, "No se pudo procesar la imagen: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	file, _, err := r.FormFile("file")
+	// Debug: imprimir valores después de ParseMultipartForm
+	fmt.Println("Form values after parse:", r.Form)
+	fmt.Println("MultipartForm after parse:", r.MultipartForm)
+
+	file, handler, err := r.FormFile("file")
 	if err != nil {
-		http.Error(w, "No se pudo leer el archivo", http.StatusBadRequest)
+		fmt.Println("Error getting form file:", err)
+		http.Error(w, "No se pudo leer el archivo: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	defer file.Close()
 
 	slug := r.FormValue("slug")
+	fmt.Println("Received slug:", slug) // Debug: imprimir el slug recibido
+
 	if slug == "" {
 		http.Error(w, "Slug es requerido", http.StatusBadRequest)
 		return
 	}
 
-	// decodificar (usando webp/png/jpg como ya tenés en bands.go)
+	// Debug: imprimir información del archivo
+	fmt.Printf("Uploaded File: %+v\n", handler.Filename)
+	fmt.Printf("File Size: %+v\n", handler.Size)
+	fmt.Printf("MIME Header: %+v\n", handler.Header)
+
 	buf := new(bytes.Buffer)
 	_, err = io.Copy(buf, file)
 	if err != nil {
@@ -1897,12 +1974,71 @@ func (h *AuthHandler) processApprovedSubmission(submissionID, reviewerID int) bo
 		success = h.processVenueSubmission(dataRaw, userID)
 	case "eventvenue":
 		success = h.processEventVenueSubmission(dataRaw, userID)
+	case "news":
+		success = h.processNewsSubmission(dataRaw, userID)
 	default:
 		fmt.Printf("[Warning] Tipo de submission no soportado para procesamiento automático: %s\n", submissionType)
 		return false
 	}
 
 	return success
+}
+
+// processNewsSubmission procesa una submission de tipo news
+func (h *AuthHandler) processNewsSubmission(dataRaw []byte, userID int) bool {
+	var newsData struct {
+		Title   string `json:"title"`
+		Content string `json:"content"`
+		Image   string `json:"image"`
+	}
+
+	if err := json.Unmarshal(dataRaw, &newsData); err != nil {
+		fmt.Printf("Error al deserializar datos de noticia: %v\n", err)
+		return false
+	}
+
+	// Generar slug desde el título
+	slug := generateSlug(newsData.Title)
+
+	// Verificar si el slug ya existe y modificarlo si es necesario
+	existingSlug, err := h.DB.SelectRow("SELECT slug FROM news WHERE slug = ?", slug)
+	if err == nil && existingSlug != nil {
+		slug = fmt.Sprintf("%s-%d", slug, time.Now().Unix())
+	}
+
+	// Mover la imagen de la carpeta temporal a la definitiva si existe
+	finalImageURL := newsData.Image
+	if newsData.Image != "" {
+		oldKey := strings.TrimPrefix(newsData.Image, "https://"+h.getBucketFromConfig()+"."+h.getEndpointFromConfig()+"/")
+		newKey := fmt.Sprintf("news/%s/%s", slug, filepath.Base(oldKey))
+		
+		if err := moveImageInSpaces(oldKey, newKey); err != nil {
+			fmt.Printf("Error al mover imagen: %v\n", err)
+			return false
+		}
+		
+		finalImageURL = fmt.Sprintf("https://%s.%s/%s", h.getBucketFromConfig(), h.getEndpointFromConfig(), newKey)
+	}
+
+	// Insertar la noticia en la base de datos
+	result, err := h.DB.Exec(`
+		INSERT INTO news (title, content, slug, image, user_id, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, NOW(), NOW())
+	`, newsData.Title, newsData.Content, slug, finalImageURL, userID)
+
+	if err != nil {
+		fmt.Printf("Error al insertar noticia: %v\n", err)
+		return false
+	}
+
+	newsID, err := result.LastInsertId()
+	if err != nil {
+		fmt.Printf("Error al obtener ID de la noticia: %v\n", err)
+		return false
+	}
+
+	fmt.Printf("Noticia creada exitosamente con ID: %d\n", newsID)
+	return true
 }
 
 // processEventSubmission procesa una submission de tipo event
@@ -1920,7 +2056,7 @@ func (h *AuthHandler) processEventSubmission(dataRaw []byte, userID int) bool {
 	}
 
 	if err := json.Unmarshal(dataRaw, &event); err != nil {
-		fmt.Printf("[Error] No se pudo decodificar el evento: %v\n", err)
+		fmt.Printf("Error al deserializar datos de evento: %v\n", err)
 		return false
 	}
 
@@ -1932,7 +2068,7 @@ func (h *AuthHandler) processEventSubmission(dataRaw []byte, userID int) bool {
 		VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		event.IDVenue, event.Title, event.Tags, event.Content, event.Slug, event.DateStart, event.DateEnd)
 	if err != nil {
-		fmt.Printf("[Error] No se pudo insertar el evento: %v\n", err)
+		fmt.Printf("Error al insertar evento: %v\n", err)
 		return false
 	}
 
@@ -1942,7 +2078,7 @@ func (h *AuthHandler) processEventSubmission(dataRaw []byte, userID int) bool {
 			INSERT INTO events_bands (id_band, id_event) VALUES (?, ?)`,
 			bandID, eventID)
 		if err != nil {
-			fmt.Printf("[Error] Error insertando banda %d: %v\n", bandID, err)
+			fmt.Printf("Error insertando banda %d: %v\n", bandID, err)
 		}
 	}
 
@@ -1952,10 +2088,10 @@ func (h *AuthHandler) processEventSubmission(dataRaw []byte, userID int) bool {
 		VALUES (?, ?, 'creador', 'approved')`,
 		userID, eventID)
 	if linkErr != nil {
-		fmt.Printf("[Error] Error al vincular evento %d con usuario %d: %v\n", eventID, userID, linkErr)
+		fmt.Printf("Error al vincular evento %d con usuario %d: %v\n", eventID, userID, linkErr)
 	}
 
-	fmt.Printf("[Success] Evento creado automáticamente con ID: %d\n", eventID)
+	fmt.Printf("Evento creado automáticamente con ID: %d\n", eventID)
 	return true
 }
 
@@ -1972,7 +2108,7 @@ func (h *AuthHandler) processVenueSubmission(dataRaw []byte, userID int) bool {
 	}
 
 	if err := json.Unmarshal(dataRaw, &venue); err != nil {
-		fmt.Printf("[Error] No se pudo decodificar el venue: %v\n", err)
+		fmt.Printf("Error al deserializar datos de venue: %v\n", err)
 		return false
 	}
 
@@ -1984,9 +2120,11 @@ func (h *AuthHandler) processVenueSubmission(dataRaw []byte, userID int) bool {
 		VALUES (?, ?, ?, ?, ?, ?)`,
 		venue.Name, venue.Address, venue.Description, venue.Slug, venue.LatLng, venue.City)
 	if err != nil {
-		fmt.Printf("[Error] No se pudo insertar el venue: %v\n", err)
+		fmt.Printf("Error al insertar venue: %v\n", err)
 		return false
 	}
+
+	fmt.Printf("[Info] Venue creado con ID: %d\n", venueID)
 
 	// Vincular el venue con el usuario que lo creó
 	_, linkErr := h.DB.Insert(false, `
@@ -1994,10 +2132,10 @@ func (h *AuthHandler) processVenueSubmission(dataRaw []byte, userID int) bool {
 		VALUES (?, ?, 'creador', 'approved')`,
 		userID, venueID)
 	if linkErr != nil {
-		fmt.Printf("[Error] Error al vincular venue %d con usuario %d: %v\n", venueID, userID, linkErr)
+		fmt.Printf("Error al vincular venue %d con usuario %d: %v\n", venueID, userID, linkErr)
 	}
 
-	fmt.Printf("[Success] Venue creado automáticamente con ID: %d\n", venueID)
+	fmt.Printf("Venue creado automáticamente con ID: %d\n", venueID)
 	return true
 }
 
@@ -2099,4 +2237,44 @@ func (h *AuthHandler) processEventVenueSubmission(dataRaw []byte, userID int) bo
 
 	fmt.Printf("[Success] Evento+Venue creados automáticamente con IDs: %d, %d\n", eventID, venueID)
 	return true
+}
+
+// generateSlug genera un slug a partir de un título
+func generateSlug(title string) string {
+	// Convertir a minúsculas
+	slug := strings.ToLower(title)
+	
+	// Reemplazar espacios con guiones
+	slug = strings.ReplaceAll(slug, " ", "-")
+	
+	// Remover caracteres especiales
+	reg := regexp.MustCompile("[^a-z0-9-]")
+	slug = reg.ReplaceAllString(slug, "")
+	
+	// Remover guiones múltiples
+	reg = regexp.MustCompile("-+")
+	slug = reg.ReplaceAllString(slug, "-")
+	
+	// Remover guiones al inicio y final
+	slug = strings.Trim(slug, "-")
+	
+	return slug
+}
+
+// getBucketFromConfig obtiene el nombre del bucket desde la configuración
+func (h *AuthHandler) getBucketFromConfig() string {
+	cfg, err := ini.Load("config.ini")
+	if err != nil {
+		return ""
+	}
+	return cfg.Section("spaces").Key("bucket").String()
+}
+
+// getEndpointFromConfig obtiene el endpoint desde la configuración
+func (h *AuthHandler) getEndpointFromConfig() string {
+	cfg, err := ini.Load("config.ini")
+	if err != nil {
+		return ""
+	}
+	return cfg.Section("spaces").Key("endpoint").String()
 }
