@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -1865,7 +1866,7 @@ func cleanHTML(html string) string {
 	return text
 }
 
-// GenerateEventDescription genera una descripción para un evento usando OpenAI
+// GenerateEventDescription genera una descripción para un evento usando Gemini
 func (h *AuthHandler) GenerateEventDescription(w http.ResponseWriter, r *http.Request) {
 	type GenerateDescriptionRequest struct {
 		Title        string   `json:"title"`
@@ -1874,6 +1875,7 @@ func (h *AuthHandler) GenerateEventDescription(w http.ResponseWriter, r *http.Re
 		Date         string   `json:"date"`
 		Bands        []string `json:"bands"`
 		CustomPrompt string   `json:"custom_prompt"`
+		FlyerURL     string   `json:"flyer_url"`
 	}
 
 	type GenerateDescriptionResponse struct {
@@ -1892,7 +1894,7 @@ Lugar: %s
 Dirección: %s
 Fecha: %s
 Bandas: %s
-%s
+%s%s
 
 Instrucciones:
 1. Escribe en español de Argentina
@@ -1905,28 +1907,70 @@ Instrucciones:
 8. Usa formato HTML para resaltar elementos importantes (<b> para nombres, <i> para géneros)
 9. Separa bien los párrafos con punto y aparte, los parrafos no pueden tener mas de 2 oraciones, usa <p> para separar los parrafos.
 10. Si bien, no te digo de usar modismos argentinos, pero evitar usar Ven o palabras asi, usa veni, y recordá que el sitio es un portal cultural.
-
+11. Si se proporciona una imagen del flyer, analizá visualmente los textos, fechas, nombres, estilos, slogans o cualquier información relevante que aparezca en la imagen y replicá esa información en la descripción textual, integrándola de manera natural con el resto de los datos. Si no hay imagen, solo usá los datos textuales.
+12. IMPORTANTE: La respuesta debe ser SOLO HTML, sin bloques de código, sin markdown, sin triple backtick, ni etiquetas <html> o <body>. Solo el contenido HTML de la descripción.
 
 Por ejemplo: El sábado 19 de abril a las 20 hs, el escenario de Ensayo Abierto recibe a Fermantic, banda invitada directamente desde Punta Arenas (Chile). Con un sonido que cruza el rock alternativo con influencias del sur patagónico, el trío se presenta por primera vez en Río Gallegos. La fecha será en el espacio cultural ubicado en Zapiola 353, y forma parte del ciclo de shows organizados por Sonoman, que sigue fortaleciendo el vínculo musical entre ambos lados de la cordillera. Una noche ideal para descubrir nuevos sonidos y compartir una experiencia distinta, en un ambiente íntimo y con entrada libre hasta completar la capacidad del lugar.
 
-Información proporcionada: %s`,
+Información proporcionada: %s%s`,
 		requestData.Title,
 		requestData.VenueName,
 		requestData.VenueAddress,
 		requestData.Date,
 		strings.Join(requestData.Bands, ", "),
+		func() string {
+			if requestData.FlyerURL != "" {
+				return fmt.Sprintf("\nImagen del flyer: %s", requestData.FlyerURL)
+			}
+			return ""
+		}(),
+		requestData.CustomPrompt,
+		// Esta linea es para que Gemini sepa que el flyer puede contener información relevante
+
+		// Pero si no hay flyer, no usarla
+		func() string {
+			if requestData.FlyerURL != "" {
+				return fmt.Sprintf("\n(La imagen puede contener información visual relevante sobre el evento, como nombres, fechas, estilos, slogans, etc. Analizá y usá esa información si está presente.)")
+			}
+			return ""
+		}(),
 		requestData.CustomPrompt)
 
-	openaiURL := "https://api.openai.com/v1/chat/completions"
-	requestBody := map[string]interface{}{
-		"model": "gpt-3.5-turbo",
-		"messages": []map[string]string{
-			{
-				"role":    "user",
-				"content": prompt,
+	parts := []map[string]interface{}{
+		{"text": prompt},
+	}
+
+	// Si hay flyer, descargar y convertir a base64 para Gemini
+	if requestData.FlyerURL != "" {
+		resp, err := http.Get(requestData.FlyerURL)
+		if err != nil {
+			http.Error(w, "No se pudo descargar el flyer", http.StatusBadRequest)
+			return
+		}
+		defer resp.Body.Close()
+		imgBytes, err := io.ReadAll(resp.Body)
+		if err != nil {
+			http.Error(w, "No se pudo leer el flyer", http.StatusInternalServerError)
+			return
+		}
+		imgBase64 := base64.StdEncoding.EncodeToString(imgBytes)
+		mimeType := resp.Header.Get("Content-Type")
+		if mimeType == "" {
+			mimeType = "image/jpeg"
+		}
+		parts = append(parts, map[string]interface{}{
+			"inline_data": map[string]interface{}{
+				"mime_type": mimeType,
+				"data":      imgBase64,
 			},
+		})
+	}
+
+	geminiURL := "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=AIzaSyCGEUfARKUKHikK1eKkoiCwmvE9DbaN3i0"
+	requestBody := map[string]interface{}{
+		"contents": []map[string]interface{}{
+			{"parts": parts},
 		},
-		"temperature": 0.5,
 	}
 
 	jsonBody, err := json.Marshal(requestBody)
@@ -1935,43 +1979,44 @@ Información proporcionada: %s`,
 		return
 	}
 
-	req, err := http.NewRequest("POST", openaiURL, bytes.NewBuffer(jsonBody))
+	req, err := http.NewRequest("POST", geminiURL, bytes.NewBuffer(jsonBody))
 	if err != nil {
 		http.Error(w, "Error al crear la solicitud", http.StatusInternalServerError)
 		return
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+getOpenAIKey())
 
 	client := &http.Client{}
-	resp, err := client.Do(req)
+	respGemini, err := client.Do(req)
 	if err != nil {
-		http.Error(w, "Error al realizar la solicitud a OpenAI", http.StatusInternalServerError)
+		http.Error(w, "Error al realizar la solicitud a Gemini", http.StatusInternalServerError)
 		return
 	}
-	defer resp.Body.Close()
+	defer respGemini.Body.Close()
 
-	var openaiResponse struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
+	var geminiResponse struct {
+		Candidates []struct {
+			Content struct {
+				Parts []struct {
+					Text string `json:"text"`
+				} `json:"parts"`
+			} `json:"content"`
+		} `json:"candidates"`
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&openaiResponse); err != nil {
-		http.Error(w, "Error al leer la respuesta de OpenAI", http.StatusInternalServerError)
+	if err := json.NewDecoder(respGemini.Body).Decode(&geminiResponse); err != nil {
+		http.Error(w, "Error al leer la respuesta de Gemini", http.StatusInternalServerError)
 		return
 	}
 
-	if len(openaiResponse.Choices) == 0 {
-		http.Error(w, "No se recibió respuesta de OpenAI", http.StatusInternalServerError)
+	if len(geminiResponse.Candidates) == 0 || len(geminiResponse.Candidates[0].Content.Parts) == 0 {
+		http.Error(w, "No se recibió respuesta de Gemini", http.StatusInternalServerError)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(GenerateDescriptionResponse{
-		Description: openaiResponse.Choices[0].Message.Content,
+		Description: geminiResponse.Candidates[0].Content.Parts[0].Text,
 	})
 }

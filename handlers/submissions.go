@@ -4,31 +4,32 @@ import (
 	"brotecolectivo/models"
 	"brotecolectivo/utils"
 	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"image"
-	"log"
 	"image/jpeg"
 	"io"
+	"log"
 	"net/http"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
-	"regexp"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
-	"strconv"
+
+	"path/filepath"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/go-chi/chi/v5"
-	"gopkg.in/ini.v1"
 	"golang.org/x/net/html"
-	"path/filepath"
+	"gopkg.in/ini.v1"
 )
 
 func generateShortWhatsAppDescription(subType, rawDescription string, id int) string {
@@ -1014,7 +1015,7 @@ func (h *AuthHandler) ApproveSubmission(w http.ResponseWriter, r *http.Request) 
 				log.Printf("[WARN] No se pudo publicar en Instagram el evento %d: %v", eventID, err)
 			}
 		}()
-		
+
 		// Crear vinculación automática entre el usuario que envió el evento y el evento creado
 		if submissionUserID > 0 && eventID > 0 {
 			fmt.Println("Creando vinculación automática para evento: UserID=", submissionUserID, "EventID=", eventID)
@@ -1121,7 +1122,7 @@ func (h *AuthHandler) ApproveSubmission(w http.ResponseWriter, r *http.Request) 
 				log.Printf("[WARN] No se pudo publicar en Instagram el evento %d: %v", eventID, err)
 			}
 		}()
-		
+
 		// Crear vinculación automática entre el usuario que envió el evento y el evento creado
 		if submissionUserID > 0 && eventID > 0 {
 			fmt.Println("Creando vinculación automática para evento: UserID=", submissionUserID, "EventID=", eventID)
@@ -2011,12 +2012,12 @@ func (h *AuthHandler) processNewsSubmission(dataRaw []byte, userID int) bool {
 	if newsData.Image != "" {
 		oldKey := strings.TrimPrefix(newsData.Image, "https://"+h.getBucketFromConfig()+"."+h.getEndpointFromConfig()+"/")
 		newKey := fmt.Sprintf("news/%s/%s", slug, filepath.Base(oldKey))
-		
+
 		if err := moveImageInSpaces(oldKey, newKey); err != nil {
 			fmt.Printf("Error al mover imagen: %v\n", err)
 			return false
 		}
-		
+
 		finalImageURL = fmt.Sprintf("https://%s.%s/%s", h.getBucketFromConfig(), h.getEndpointFromConfig(), newKey)
 	}
 
@@ -2208,6 +2209,16 @@ func (h *AuthHandler) processEventVenueSubmission(dataRaw []byte, userID int) bo
 
 	fmt.Printf("[Info] Evento creado con ID: %d\n", eventID)
 
+	// mover la imagen de la submission al bucket
+	_ = moveImageInSpaces("pending/"+combined.Event.Slug+".jpg", "events/"+combined.Event.Slug+".jpg")
+
+	// publicar en IG
+	go func() {
+		if err := h.PublishEventToInstagramByID(eventID); err != nil {
+			log.Printf("[WARN] No se pudo publicar en Instagram el evento %d: %v", eventID, err)
+		}
+	}()
+
 	// Insertar relaciones en events_bands
 	for _, bandID := range combined.Event.BandIDs {
 		_, err := h.DB.Insert(false, `
@@ -2243,21 +2254,21 @@ func (h *AuthHandler) processEventVenueSubmission(dataRaw []byte, userID int) bo
 func generateSlug(title string) string {
 	// Convertir a minúsculas
 	slug := strings.ToLower(title)
-	
+
 	// Reemplazar espacios con guiones
 	slug = strings.ReplaceAll(slug, " ", "-")
-	
+
 	// Remover caracteres especiales
 	reg := regexp.MustCompile("[^a-z0-9-]")
 	slug = reg.ReplaceAllString(slug, "")
-	
+
 	// Remover guiones múltiples
 	reg = regexp.MustCompile("-+")
 	slug = reg.ReplaceAllString(slug, "-")
-	
+
 	// Remover guiones al inicio y final
 	slug = strings.Trim(slug, "-")
-	
+
 	return slug
 }
 
